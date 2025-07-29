@@ -5,6 +5,7 @@ let projectiles = [];
 let planets = [];
 let aliens = [];
 let thrustParticles = [];
+let isFullscreen = false;
 
 function setup() {
   createCanvas(800, 600);
@@ -34,7 +35,8 @@ function draw() {
     players[i].display();
     for (let j = aliens.length - 1; j >= 0; j--) {
       if (dist(players[i].pos.x, players[i].pos.y, aliens[j].pos.x, aliens[j].pos.y) < 20) {
-        players[i].health -= 1;
+        // Increased damage from alien collision
+        players[i].health -= 10;
         explode(players[i].pos);
         aliens.splice(j, 1);
         if (players[i].health <= 0) {
@@ -101,6 +103,20 @@ function draw() {
   }
 }
 
+// Add a mousePressed function to handle fullscreen toggle
+function mousePressed() {
+  if (!isFullscreen) {
+    fullscreen(true);
+    isFullscreen = true;
+  }
+  return false; // Prevent default behavior
+}
+
+// Handle fullscreen change events
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+
 class Player {
   constructor(x, y, lKey, rKey, tKey, sKey) {
     this.pos = createVector(x, y);
@@ -122,11 +138,24 @@ class Player {
     if (keyIsDown(this.tKey)) {
       let force = p5.Vector.fromAngle(this.angle).mult(0.1);
       this.acc.add(force);
-      thrustParticles.push(new ThrustParticle(this.pos.copy(), p5.Vector.fromAngle(this.angle + PI).mult(random(1, 2))));
+      
+      // Get the position at the back of the ship for thrust particles
+      let backPos = this.pos.copy();
+      let backOffset = p5.Vector.fromAngle(this.angle + PI).mult(10);
+      backPos.add(backOffset);
+      
+      // Create thrust particles from the back of the ship
+      thrustParticles.push(new ThrustParticle(backPos, p5.Vector.fromAngle(this.angle + PI).mult(random(1, 2))));
     }
     if (keyIsDown(this.sKey) && millis() - this.lastShot > 600) {
+      // Calculate the position at the tip of the ship
+      let tipPos = this.pos.copy();
+      let tipOffset = p5.Vector.fromAngle(this.angle).mult(15);
+      tipPos.add(tipOffset);
+      
+      // Create projectile from the tip of the ship
       let pVel = p5.Vector.fromAngle(this.angle).mult(4);
-      projectiles.push(new Projectile(this.pos.copy(), pVel));
+      projectiles.push(new Projectile(tipPos, pVel));
       this.lastShot = millis();
     }
 
@@ -223,6 +252,7 @@ class Alien {
   }
 
   update() {
+    // Type-specific movement
     if (this.type === "planet" && planets.length > 0) {
       let target = planets.reduce((a, b) => p5.Vector.dist(this.pos, a.pos) < p5.Vector.dist(this.pos, b.pos) ? a : b);
       let dir = p5.Vector.sub(target.pos, this.pos).setMag(0.3);
@@ -232,13 +262,29 @@ class Alien {
       let dir = p5.Vector.sub(target.pos, this.pos).setMag(0.3);
       this.vel = dir;
     }
+    // Apply gravity from planets, similar to players
+    for (let planet of planets) {
+      let force = p5.Vector.sub(planet.pos, this.pos);
+      let d = force.mag();
+      if (d > 5) {
+        let strength = 20 / (d * d);
+        force.setMag(strength);
+        this.vel.add(force);
+      }
+    }
+    // Update position
     this.pos.add(this.vel);
   }
 
   display() {
     push();
     translate(this.pos.x, this.pos.y);
-    fill(150, 0, 255);
+    // Color based on alien type
+    let col;
+    if (this.type === 'planet') col = color(0, 255, 100);
+    else if (this.type === 'player') col = color(255, 50, 50);
+    else col = color(150, 0, 255);
+    fill(col);
     stroke(255);
     strokeWeight(1);
     beginShape();
