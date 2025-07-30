@@ -9,8 +9,9 @@ const GAME_CONFIG = {
   BACKGROUND_COLOR: 10,
   
   // Physics constants
-  GRAVITY_STRENGTH: 100,
-  MIN_GRAVITY_DISTANCE: 10,
+  GRAVITY_STRENGTH: 200,
+  MIN_GRAVITY_DISTANCE: 50, // Increased to prevent objects from getting too close
+  PLANET_SURFACE_BUFFER: 5, // Extra buffer from planet surface
   MAX_VELOCITY: 3,
   
   // Player settings
@@ -314,11 +315,22 @@ function applyPlanetaryGravity(pos, vel) {
   for (let planet of gameState.planets) {
     const force = p5.Vector.sub(planet.pos, pos);
     const distance = force.mag();
+    const planetRadius = GAME_CONFIG.PLANET_SIZE / 2;
+    const safeDistance = planetRadius + GAME_CONFIG.PLANET_SURFACE_BUFFER;
     
+    // Only apply gravity if object is far enough from planet
     if (distance > GAME_CONFIG.MIN_GRAVITY_DISTANCE) {
-      const strength = GAME_CONFIG.GRAVITY_STRENGTH / (distance * distance);
-      force.setMag(strength);
-      vel.add(force);
+      // If too close to planet surface, apply repulsive force to push away
+      if (distance < safeDistance) {
+        const repulsiveStrength = GAME_CONFIG.GRAVITY_STRENGTH / (distance * distance * 2);
+        force.setMag(-repulsiveStrength); // Negative to push away
+        vel.add(force);
+      } else {
+        // Normal gravitational attraction with reduced strength at close distances
+        const strength = GAME_CONFIG.GRAVITY_STRENGTH / (distance * distance * distance * 0.01);
+        force.setMag(strength);
+        vel.add(force);
+      }
     }
   }
 }
