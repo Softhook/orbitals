@@ -1,314 +1,778 @@
 // === Space Defenders Game ===
+// A multiplayer space combat game with gravitational physics
 
-let players = [];
-let projectiles = [];
-let planets = [];
-let aliens = [];
-let thrustParticles = [];
-let isFullscreen = false;
+// === GAME CONSTANTS ===
+const GAME_CONFIG = {
+  // Canvas settings
+  CANVAS_WIDTH: 800,
+  CANVAS_HEIGHT: 600,
+  BACKGROUND_COLOR: 10,
+  
+  // Physics constants
+  GRAVITY_STRENGTH: 100,
+  MIN_GRAVITY_DISTANCE: 10,
+  MAX_VELOCITY: 3,
+  
+  // Player settings
+  PLAYER_ROTATION_SPEED: 0.05,
+  PLAYER_THRUST_FORCE: 0.05,
+  PLAYER_SHOT_COOLDOWN: 600, // milliseconds
+  PLAYER_MAX_HEALTH: 100,
+  PLAYER_SIZE: 10,
+  COLLISION_DAMAGE_TO_PLAYER: 10,
+  
+  // Projectile settings
+  PROJECTILE_SPEED: 4,
+  PROJECTILE_SIZE: 6,
+  PROJECTILE_HIT_RADIUS: 15,
+  
+  // Planet settings
+  PLANET_COUNT: 3,
+  PLANET_SIZE: 40,
+  PLANET_MAX_HEALTH: 10,
+  PLANET_HIT_RADIUS: 30,
+  
+  // Alien settings
+  ALIEN_SPAWN_INTERVAL: 120, // frames
+  ALIEN_BASE_SPEED: 0.5,
+  ALIEN_TARGET_SPEED: 0.3,
+  ALIEN_SIZE: 15,
+  ALIEN_PLAYER_HIT_RADIUS: 20,
+  
+  // Particle settings
+  THRUST_PARTICLE_LIFESPAN: 255,
+  THRUST_PARTICLE_DECAY: 5,
+  EXPLOSION_PARTICLE_COUNT: 20
+};
 
+// === GAME STATE ===
+let gameState = {
+  players: [],
+  projectiles: [],
+  planets: [],
+  aliens: [],
+  thrustParticles: [],
+  isFullscreen: false
+};
+
+// === MAIN GAME FUNCTIONS ===
+
+/**
+ * Initialize the game canvas and create initial game objects
+ */
 function setup() {
-  createCanvas(800, 600);
+  createCanvas(GAME_CONFIG.CANVAS_WIDTH, GAME_CONFIG.CANVAS_HEIGHT);
   angleMode(RADIANS);
-  players.push(new Player(width * 0.25, height / 2, LEFT_ARROW, RIGHT_ARROW, UP_ARROW, DOWN_ARROW));
-  players.push(new Player(width * 0.75, height / 2, 65, 68, 87, 32)); // A, D, W, SPACE
-  for (let i = 0; i < 3; i++) {
-    planets.push(new Planet(random(width), random(height)));
+  
+  // Initialize players with different positions and control schemes
+  initializePlayers();
+  
+  // Create initial planets at random positions
+  initializePlanets();
+}
+
+/**
+ * Initialize player objects with their control schemes
+ */
+function initializePlayers() {
+  // Player 1: Arrow keys
+  gameState.players.push(new Player(
+    width * 0.25, 
+    height / 2, 
+    LEFT_ARROW, RIGHT_ARROW, UP_ARROW, DOWN_ARROW
+  ));
+  
+  // Player 2: WASD + Space
+  gameState.players.push(new Player(
+    width * 0.75, 
+    height / 2, 
+    65, 68, 87, 32 // A, D, W, SPACE
+  ));
+}
+
+/**
+ * Create initial planets at random positions
+ */
+function initializePlanets() {
+  for (let i = 0; i < GAME_CONFIG.PLANET_COUNT; i++) {
+    gameState.planets.push(new Planet(random(width), random(height)));
   }
 }
 
+/**
+ * Main game loop - updates and renders all game objects
+ */
 function draw() {
-  background(10);
+  background(GAME_CONFIG.BACKGROUND_COLOR);
+  
+  // Process all game entities in order
+  updateAndDrawPlanets();
+  updateAndDrawPlayers();
+  updateAndDrawProjectiles();
+  updateAndDrawAliens();
+  spawnAliens();
+  updateAndDrawParticles();
+}
 
-  // Update and draw planets
-  for (let i = planets.length - 1; i >= 0; i--) {
-    planets[i].display();
-    if (planets[i].health <= 0) {
-      explode(planets[i].pos);
-      planets.splice(i, 1);
-    }
-  }
-
-  // Update and draw players
-  for (let i = players.length - 1; i >= 0; i--) {
-    players[i].update();
-    players[i].display();
-    for (let j = aliens.length - 1; j >= 0; j--) {
-      if (dist(players[i].pos.x, players[i].pos.y, aliens[j].pos.x, aliens[j].pos.y) < 20) {
-        // Increased damage from alien collision
-        players[i].health -= 10;
-        explode(players[i].pos);
-        aliens.splice(j, 1);
-        if (players[i].health <= 0) {
-          players.splice(i, 1);
-          break;
-        }
-      }
-    }
-  }
-
-  // Update and draw projectiles
-  for (let i = projectiles.length - 1; i >= 0; i--) {
-    let p = projectiles[i];
-    for (let j = aliens.length - 1; j >= 0; j--) {
-      if (dist(p.pos.x, p.pos.y, aliens[j].pos.x, aliens[j].pos.y) < 15) {
-        explode(aliens[j].pos);
-        aliens.splice(j, 1);
-        projectiles.splice(i, 1);
-        break;
-      }
-    }
-    if (p && (p.pos.x < 0 || p.pos.x > width || p.pos.y < 0 || p.pos.y > height)) {
-      projectiles.splice(i, 1);
-    } else if (p) {
-      p.update();
-      p.display();
-    }
-  }
-
-  // Update and draw aliens
-  for (let i = aliens.length - 1; i >= 0; i--) {
-    aliens[i].update();
-    aliens[i].display();
-    for (let j = planets.length - 1; j >= 0; j--) {
-      if (dist(aliens[i].pos.x, aliens[i].pos.y, planets[j].pos.x, planets[j].pos.y) < 30) {
-        planets[j].health -= 1;
-        explode(aliens[i].pos);
-        aliens.splice(i, 1);
-        break;
-      }
-    }
-  }
-
-  // Spawn aliens
-  if (frameCount % 120 === 0) {
-    let edge = floor(random(4));
-    let pos;
-    if (edge === 0) pos = createVector(random(width), 0);
-    else if (edge === 1) pos = createVector(width, random(height));
-    else if (edge === 2) pos = createVector(random(width), height);
-    else pos = createVector(0, random(height));
-
-    let type = random(["dumb", "planet", "player"]);
-    aliens.push(new Alien(pos.x, pos.y, type));
-  }
-
-  // Thrust particles
-  for (let i = thrustParticles.length - 1; i >= 0; i--) {
-    thrustParticles[i].update();
-    thrustParticles[i].display();
-    if (thrustParticles[i].lifespan <= 0) {
-      thrustParticles.splice(i, 1);
+/**
+ * Handle planet updates, rendering, and destruction
+ */
+function updateAndDrawPlanets() {
+  for (let i = gameState.planets.length - 1; i >= 0; i--) {
+    const planet = gameState.planets[i];
+    planet.display();
+    
+    // Remove destroyed planets
+    if (planet.health <= 0) {
+      createExplosion(planet.pos);
+      gameState.planets.splice(i, 1);
     }
   }
 }
 
-// Add a mousePressed function to handle fullscreen toggle
+/**
+ * Handle player updates, rendering, and collision detection
+ */
+function updateAndDrawPlayers() {
+  for (let i = gameState.players.length - 1; i >= 0; i--) {
+    const player = gameState.players[i];
+    player.update();
+    player.display();
+    
+    // Check collisions with aliens
+    checkPlayerAlienCollisions(player, i);
+  }
+}
+
+/**
+ * Check collisions between a player and all aliens
+ */
+function checkPlayerAlienCollisions(player, playerIndex) {
+  for (let j = gameState.aliens.length - 1; j >= 0; j--) {
+    const alien = gameState.aliens[j];
+    const distance = dist(player.pos.x, player.pos.y, alien.pos.x, alien.pos.y);
+    
+    if (distance < GAME_CONFIG.ALIEN_PLAYER_HIT_RADIUS) {
+      // Apply damage to player
+      player.health -= GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
+      createExplosion(player.pos);
+      gameState.aliens.splice(j, 1);
+      
+      // Remove player if health depleted
+      if (player.health <= 0) {
+        gameState.players.splice(playerIndex, 1);
+        break;
+      }
+    }
+  }
+}
+
+/**
+ * Handle projectile updates, rendering, and collision detection
+ */
+function updateAndDrawProjectiles() {
+  for (let i = gameState.projectiles.length - 1; i >= 0; i--) {
+    const projectile = gameState.projectiles[i];
+    
+    // Check alien collisions
+    if (checkProjectileAlienCollisions(projectile, i)) {
+      continue; // Projectile was destroyed
+    }
+    
+    // Remove projectiles that leave the screen
+    if (isOffScreen(projectile.pos)) {
+      gameState.projectiles.splice(i, 1);
+    } else {
+      projectile.update();
+      projectile.display();
+    }
+  }
+}
+
+/**
+ * Check collisions between a projectile and all aliens
+ * @param {Projectile} projectile - The projectile to check
+ * @param {number} projectileIndex - Index of the projectile
+ * @returns {boolean} - True if projectile was destroyed
+ */
+function checkProjectileAlienCollisions(projectile, projectileIndex) {
+  for (let j = gameState.aliens.length - 1; j >= 0; j--) {
+    const alien = gameState.aliens[j];
+    const distance = dist(projectile.pos.x, projectile.pos.y, alien.pos.x, alien.pos.y);
+    
+    if (distance < GAME_CONFIG.PROJECTILE_HIT_RADIUS) {
+      createExplosion(alien.pos);
+      gameState.aliens.splice(j, 1);
+      gameState.projectiles.splice(projectileIndex, 1);
+      return true; // Projectile destroyed
+    }
+  }
+  return false; // Projectile still exists
+}
+
+/**
+ * Handle alien updates, rendering, and collision with planets
+ */
+function updateAndDrawAliens() {
+  for (let i = gameState.aliens.length - 1; i >= 0; i--) {
+    const alien = gameState.aliens[i];
+    alien.update();
+    alien.display();
+    
+    // Check collisions with planets
+    checkAlienPlanetCollisions(alien, i);
+  }
+}
+
+/**
+ * Check collisions between an alien and all planets
+ */
+function checkAlienPlanetCollisions(alien, alienIndex) {
+  for (let j = gameState.planets.length - 1; j >= 0; j--) {
+    const planet = gameState.planets[j];
+    const distance = dist(alien.pos.x, alien.pos.y, planet.pos.x, planet.pos.y);
+    
+    if (distance < GAME_CONFIG.PLANET_HIT_RADIUS) {
+      planet.health -= 1;
+      createExplosion(alien.pos);
+      gameState.aliens.splice(alienIndex, 1);
+      break;
+    }
+  }
+}
+
+/**
+ * Spawn new aliens at regular intervals from screen edges
+ */
+function spawnAliens() {
+  if (frameCount % GAME_CONFIG.ALIEN_SPAWN_INTERVAL === 0) {
+    const spawnPosition = getRandomEdgePosition();
+    const alienType = random(["dumb", "planet", "player"]);
+    gameState.aliens.push(new Alien(spawnPosition.x, spawnPosition.y, alienType));
+  }
+}
+
+/**
+ * Get a random position at the edge of the screen
+ * @returns {p5.Vector} - Random edge position
+ */
+function getRandomEdgePosition() {
+  const edge = floor(random(4));
+  switch (edge) {
+    case 0: return createVector(random(width), 0); // Top
+    case 1: return createVector(width, random(height)); // Right
+    case 2: return createVector(random(width), height); // Bottom
+    case 3: return createVector(0, random(height)); // Left
+  }
+}
+
+/**
+ * Handle particle updates and rendering
+ */
+function updateAndDrawParticles() {
+  for (let i = gameState.thrustParticles.length - 1; i >= 0; i--) {
+    const particle = gameState.thrustParticles[i];
+    particle.update();
+    particle.display();
+    
+    // Remove expired particles
+    if (particle.lifespan <= 0) {
+      gameState.thrustParticles.splice(i, 1);
+    }
+  }
+}
+
+// === UTILITY FUNCTIONS ===
+
+/**
+ * Check if a position is outside the screen boundaries
+ * @param {p5.Vector} pos - Position to check
+ * @returns {boolean} - True if position is off screen
+ */
+function isOffScreen(pos) {
+  return pos.x < 0 || pos.x > width || pos.y < 0 || pos.y > height;
+}
+
+/**
+ * Create an explosion effect at the given position
+ * @param {p5.Vector} pos - Position to create explosion
+ * @param {p5.Color} col - Color of explosion particles (optional)
+ */
+function createExplosion(pos, col = color(255, 100, 0)) {
+  for (let i = 0; i < GAME_CONFIG.EXPLOSION_PARTICLE_COUNT; i++) {
+    const velocity = p5.Vector.random2D().mult(random(1, 3));
+    gameState.thrustParticles.push(new ThrustParticle(pos.copy(), velocity));
+  }
+}
+
+/**
+ * Apply gravitational force from planets to an object
+ * @param {p5.Vector} pos - Position of the object
+ * @param {p5.Vector} vel - Velocity vector to modify
+ */
+function applyPlanetaryGravity(pos, vel) {
+  for (let planet of gameState.planets) {
+    const force = p5.Vector.sub(planet.pos, pos);
+    const distance = force.mag();
+    
+    if (distance > GAME_CONFIG.MIN_GRAVITY_DISTANCE) {
+      const strength = GAME_CONFIG.GRAVITY_STRENGTH / (distance * distance);
+      force.setMag(strength);
+      vel.add(force);
+    }
+  }
+}
+
+/**
+ * Find the closest target from an array of objects
+ * @param {p5.Vector} pos - Position to measure from
+ * @param {Array} targets - Array of objects with pos property
+ * @returns {Object|null} - Closest target or null if array is empty
+ */
+function findClosestTarget(pos, targets) {
+  if (targets.length === 0) return null;
+  
+  return targets.reduce((closest, current) => {
+    const closestDist = p5.Vector.dist(pos, closest.pos);
+    const currentDist = p5.Vector.dist(pos, current.pos);
+    return currentDist < closestDist ? current : closest;
+  });
+}
+
+// === INPUT HANDLERS ===
+
+/**
+ * Handle mouse click to toggle fullscreen mode
+ */
 function mousePressed() {
-  if (!isFullscreen) {
+  if (!gameState.isFullscreen) {
     fullscreen(true);
-    isFullscreen = true;
+    gameState.isFullscreen = true;
   }
   return false; // Prevent default behavior
 }
 
-// Handle fullscreen change events
+/**
+ * Handle canvas resizing when entering/exiting fullscreen
+ */
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
 }
 
+// === GAME CLASSES ===
+
+/**
+ * Player class representing a controllable spaceship
+ */
 class Player {
+  /**
+   * Create a new player
+   * @param {number} x - Initial x position
+   * @param {number} y - Initial y position
+   * @param {number} lKey - Left rotation key code
+   * @param {number} rKey - Right rotation key code
+   * @param {number} tKey - Thrust key code
+   * @param {number} sKey - Shoot key code
+   */
   constructor(x, y, lKey, rKey, tKey, sKey) {
     this.pos = createVector(x, y);
     this.vel = createVector();
     this.acc = createVector();
-    this.angle = -HALF_PI;
-    this.lKey = lKey;
-    this.rKey = rKey;
-    this.tKey = tKey;
-    this.sKey = sKey;
-    this.health = 100;
-    this.col = color(random(100, 255), random(100, 255), random(100, 255));
-    this.lastShot = 0;
+    this.angle = -HALF_PI; // Point upward initially
+    
+    // Control scheme
+    this.controls = { left: lKey, right: rKey, thrust: tKey, shoot: sKey };
+    
+    // Game properties
+    this.health = GAME_CONFIG.PLAYER_MAX_HEALTH;
+    this.color = color(random(100, 255), random(100, 255), random(100, 255));
+    this.lastShotTime = 0;
   }
 
+  /**
+   * Update player physics and handle input
+   */
   update() {
-    if (keyIsDown(this.lKey)) this.angle -= 0.05;
-    if (keyIsDown(this.rKey)) this.angle += 0.05;
-    if (keyIsDown(this.tKey)) {
-      let force = p5.Vector.fromAngle(this.angle).mult(0.1);
-      this.acc.add(force);
-      
-      // Get the position at the back of the ship for thrust particles
-      let backPos = this.pos.copy();
-      let backOffset = p5.Vector.fromAngle(this.angle + PI).mult(10);
-      backPos.add(backOffset);
-      
-      // Create thrust particles from the back of the ship
-      thrustParticles.push(new ThrustParticle(backPos, p5.Vector.fromAngle(this.angle + PI).mult(random(1, 2))));
+    this.handleInput();
+    this.applyPhysics();
+    this.constrainToScreen();
+  }
+
+  /**
+   * Handle player input for movement and shooting
+   */
+  handleInput() {
+    // Rotation
+    if (keyIsDown(this.controls.left)) {
+      this.angle -= GAME_CONFIG.PLAYER_ROTATION_SPEED;
     }
-    if (keyIsDown(this.sKey) && millis() - this.lastShot > 600) {
-      // Calculate the position at the tip of the ship
-      let tipPos = this.pos.copy();
-      let tipOffset = p5.Vector.fromAngle(this.angle).mult(15);
-      tipPos.add(tipOffset);
-      
-      // Create projectile from the tip of the ship
-      let pVel = p5.Vector.fromAngle(this.angle).mult(4);
-      projectiles.push(new Projectile(tipPos, pVel));
-      this.lastShot = millis();
+    if (keyIsDown(this.controls.right)) {
+      this.angle += GAME_CONFIG.PLAYER_ROTATION_SPEED;
     }
 
-    for (let planet of planets) {
-      let force = p5.Vector.sub(planet.pos, this.pos);
-      let d = force.mag();
-      if (d > 5) {
-        let strength = 20 / (d * d);
-        force.setMag(strength);
-        this.acc.add(force);
-      }
+    // Thrust
+    if (keyIsDown(this.controls.thrust)) {
+      this.applyThrust();
+      this.createThrustParticles();
     }
 
+    // Shooting
+    if (keyIsDown(this.controls.shoot)) {
+      this.tryToShoot();
+    }
+  }
+
+  /**
+   * Apply thrust force in the direction the ship is facing
+   */
+  applyThrust() {
+    const thrustVector = p5.Vector.fromAngle(this.angle).mult(GAME_CONFIG.PLAYER_THRUST_FORCE);
+    this.acc.add(thrustVector);
+  }
+
+  /**
+   * Create visual thrust particles behind the ship
+   */
+  createThrustParticles() {
+    const backPosition = this.getBackPosition();
+    const particleVelocity = p5.Vector.fromAngle(this.angle + PI).mult(random(1, 2));
+    gameState.thrustParticles.push(new ThrustParticle(backPosition, particleVelocity));
+  }
+
+  /**
+   * Attempt to shoot a projectile (with cooldown)
+   */
+  tryToShoot() {
+    const currentTime = millis();
+    if (currentTime - this.lastShotTime > GAME_CONFIG.PLAYER_SHOT_COOLDOWN) {
+      this.shoot();
+      this.lastShotTime = currentTime;
+    }
+  }
+
+  /**
+   * Create and fire a projectile from the ship's tip
+   */
+  shoot() {
+    const tipPosition = this.getTipPosition();
+    const projectileVelocity = p5.Vector.fromAngle(this.angle).mult(GAME_CONFIG.PROJECTILE_SPEED);
+    gameState.projectiles.push(new Projectile(tipPosition, projectileVelocity));
+  }
+
+  /**
+   * Apply physics including gravity and movement
+   */
+  applyPhysics() {
+    // Apply planetary gravity
+    applyPlanetaryGravity(this.pos, this.acc);
+    
+    // Update velocity and position
     this.vel.add(this.acc);
-    this.vel.limit(3);
+    this.vel.limit(GAME_CONFIG.MAX_VELOCITY);
     this.pos.add(this.vel);
+    
+    // Reset acceleration for next frame
     this.acc.mult(0);
+  }
 
+  /**
+   * Keep player within screen boundaries
+   */
+  constrainToScreen() {
     this.pos.x = constrain(this.pos.x, 0, width);
     this.pos.y = constrain(this.pos.y, 0, height);
   }
 
+  /**
+   * Get the position at the tip of the ship
+   * @returns {p5.Vector} - Tip position
+   */
+  getTipPosition() {
+    const tipOffset = p5.Vector.fromAngle(this.angle).mult(GAME_CONFIG.PLAYER_SIZE);
+    return p5.Vector.add(this.pos, tipOffset);
+  }
+
+  /**
+   * Get the position at the back of the ship
+   * @returns {p5.Vector} - Back position
+   */
+  getBackPosition() {
+    const backOffset = p5.Vector.fromAngle(this.angle + PI).mult(10);
+    return p5.Vector.add(this.pos, backOffset);
+  }
+
+  /**
+   * Render the player ship and health bar
+   */
   display() {
+    this.drawShip();
+    this.drawHealthBar();
+  }
+
+  /**
+   * Draw the triangular ship
+   */
+  drawShip() {
     push();
     translate(this.pos.x, this.pos.y);
     rotate(this.angle);
-    fill(this.col);
+    fill(this.color);
     stroke(255);
     strokeWeight(1);
+    
+    // Draw triangular ship
     beginShape();
-    vertex(15, 0);
+    vertex(GAME_CONFIG.PLAYER_SIZE, 0);
     vertex(-10, 7);
     vertex(-10, -7);
     endShape(CLOSE);
     pop();
+  }
 
-    // Health bar
+  /**
+   * Draw the health bar above the ship
+   */
+  drawHealthBar() {
+    const barWidth = 40;
+    const barHeight = 5;
+    const barX = this.pos.x - barWidth / 2;
+    const barY = this.pos.y - 30;
+
     push();
+    // Background (red)
     fill(255, 0, 0);
-    rect(this.pos.x - 20, this.pos.y - 30, 40, 5);
+    noStroke();
+    rect(barX, barY, barWidth, barHeight);
+    
+    // Health (green)
     fill(0, 255, 0);
-    rect(this.pos.x - 20, this.pos.y - 30, map(this.health, 0, 100, 0, 40), 5);
+    const healthWidth = map(this.health, 0, GAME_CONFIG.PLAYER_MAX_HEALTH, 0, barWidth);
+    rect(barX, barY, healthWidth, barHeight);
     pop();
   }
 }
 
+/**
+ * Projectile class representing bullets fired by players
+ */
 class Projectile {
+  /**
+   * Create a new projectile
+   * @param {p5.Vector} pos - Initial position
+   * @param {p5.Vector} vel - Initial velocity
+   */
   constructor(pos, vel) {
-    this.pos = pos;
-    this.vel = vel;
+    this.pos = pos.copy();
+    this.vel = vel.copy();
   }
 
+  /**
+   * Update projectile physics
+   */
   update() {
-    for (let planet of planets) {
-      let force = p5.Vector.sub(planet.pos, this.pos);
-      let d = force.mag();
-      if (d > 5) {
-        let strength = 20 / (d * d);
-        force.setMag(strength);
-        this.vel.add(force);
-      }
-    }
-    this.pos.add(this.vel);
-  }
-
-  display() {
-    fill(255, 200, 0);
-    noStroke();
-    ellipse(this.pos.x, this.pos.y, 6);
-  }
-}
-
-class Planet {
-  constructor(x, y) {
-    this.pos = createVector(x, y);
-    this.health = 100;
-  }
-
-  display() {
-    fill(100, 150, 255);
-    stroke(255);
-    ellipse(this.pos.x, this.pos.y, 40);
-    fill(0, 255, 0);
-    rect(this.pos.x - 20, this.pos.y - 30, map(this.health, 0, 100, 40, 0), 5);
-  }
-}
-
-class Alien {
-  constructor(x, y, type) {
-    this.pos = createVector(x, y);
-    this.vel = p5.Vector.random2D().mult(0.5);
-    this.type = type;
-    this.sides = type === "planet" ? 5 : type === "player" ? 4 : 6;
-  }
-
-  update() {
-    // Type-specific movement
-    if (this.type === "planet" && planets.length > 0) {
-      let target = planets.reduce((a, b) => p5.Vector.dist(this.pos, a.pos) < p5.Vector.dist(this.pos, b.pos) ? a : b);
-      let dir = p5.Vector.sub(target.pos, this.pos).setMag(0.3);
-      this.vel = dir;
-    } else if (this.type === "player" && players.length > 0) {
-      let target = players.reduce((a, b) => p5.Vector.dist(this.pos, a.pos) < p5.Vector.dist(this.pos, b.pos) ? a : b);
-      let dir = p5.Vector.sub(target.pos, this.pos).setMag(0.3);
-      this.vel = dir;
-    }
-    // Apply gravity from planets, similar to players
-    for (let planet of planets) {
-      let force = p5.Vector.sub(planet.pos, this.pos);
-      let d = force.mag();
-      if (d > 5) {
-        let strength = 20 / (d * d);
-        force.setMag(strength);
-        this.vel.add(force);
-      }
-    }
+    // Apply planetary gravity to projectiles
+    applyPlanetaryGravity(this.pos, this.vel);
+    
     // Update position
     this.pos.add(this.vel);
   }
 
+  /**
+   * Render the projectile as a yellow circle
+   */
+  display() {
+    fill(255, 200, 0);
+    noStroke();
+    ellipse(this.pos.x, this.pos.y, GAME_CONFIG.PROJECTILE_SIZE);
+  }
+}
+
+/**
+ * Planet class representing gravitational bodies
+ */
+class Planet {
+  /**
+   * Create a new planet
+   * @param {number} x - X position
+   * @param {number} y - Y position
+   */
+  constructor(x, y) {
+    this.pos = createVector(x, y);
+    this.health = GAME_CONFIG.PLANET_MAX_HEALTH;
+  }
+
+  /**
+   * Render the planet and its health bar
+   */
+  display() {
+    this.drawPlanet();
+    this.drawHealthBar();
+  }
+
+  /**
+   * Draw the planet as a blue circle
+   */
+  drawPlanet() {
+    fill(100, 150, 255);
+    stroke(255);
+    ellipse(this.pos.x, this.pos.y, GAME_CONFIG.PLANET_SIZE);
+  }
+
+  /**
+   * Draw the planet's health bar
+   */
+  drawHealthBar() {
+    const barWidth = 40;
+    const barHeight = 5;
+    const barX = this.pos.x - barWidth / 2;
+    const barY = this.pos.y - 30;
+
+    fill(0, 255, 0);
+    noStroke();
+    const healthWidth = map(this.health, 0, GAME_CONFIG.PLANET_MAX_HEALTH, 0, barWidth);
+    rect(barX, barY, healthWidth, barHeight);
+  }
+}
+
+/**
+ * Alien class representing enemy entities with different behaviors
+ */
+class Alien {
+  /**
+   * Create a new alien
+   * @param {number} x - X position
+   * @param {number} y - Y position  
+   * @param {string} type - Alien type: "dumb", "planet", or "player"
+   */
+  constructor(x, y, type) {
+    this.pos = createVector(x, y);
+    this.vel = p5.Vector.random2D().mult(GAME_CONFIG.ALIEN_BASE_SPEED);
+    this.type = type;
+    this.sides = this.getSidesForType(type);
+    this.color = this.getColorForType(type);
+  }
+
+  /**
+   * Get the number of sides for the alien shape based on type
+   * @param {string} type - Alien type
+   * @returns {number} - Number of sides
+   */
+  getSidesForType(type) {
+    switch (type) {
+      case "planet": return 5;
+      case "player": return 4;
+      default: return 6; // "dumb" type
+    }
+  }
+
+  /**
+   * Get the color for the alien based on type
+   * @param {string} type - Alien type
+   * @returns {p5.Color} - Alien color
+   */
+  getColorForType(type) {
+    switch (type) {
+      case "planet": return color(0, 255, 100); // Green - seeks planets
+      case "player": return color(255, 50, 50);  // Red - seeks players
+      default: return color(150, 0, 255);        // Purple - random movement
+    }
+  }
+
+  /**
+   * Update alien movement and physics
+   */
+  update() {
+    this.updateMovement();
+    this.applyGravity();
+    this.updatePosition();
+  }
+
+  /**
+   * Update movement based on alien type
+   */
+  updateMovement() {
+    if (this.type === "planet" && gameState.planets.length > 0) {
+      this.seekTarget(gameState.planets);
+    } else if (this.type === "player" && gameState.players.length > 0) {
+      this.seekTarget(gameState.players);
+    }
+    // "dumb" aliens maintain random movement (no change needed)
+  }
+
+  /**
+   * Seek the closest target from an array
+   * @param {Array} targets - Array of target objects
+   */
+  seekTarget(targets) {
+    const target = findClosestTarget(this.pos, targets);
+    if (target) {
+      const direction = p5.Vector.sub(target.pos, this.pos);
+      direction.setMag(GAME_CONFIG.ALIEN_TARGET_SPEED);
+      this.vel = direction;
+    }
+  }
+
+  /**
+   * Apply gravitational forces from planets
+   */
+  applyGravity() {
+    applyPlanetaryGravity(this.pos, this.vel);
+  }
+
+  /**
+   * Update position based on velocity
+   */
+  updatePosition() {
+    this.pos.add(this.vel);
+  }
+
+  /**
+   * Render the alien as a colored polygon
+   */
   display() {
     push();
     translate(this.pos.x, this.pos.y);
-    // Color based on alien type
-    let col;
-    if (this.type === 'planet') col = color(0, 255, 100);
-    else if (this.type === 'player') col = color(255, 50, 50);
-    else col = color(150, 0, 255);
-    fill(col);
+    fill(this.color);
     stroke(255);
     strokeWeight(1);
+    
+    // Draw polygon based on number of sides
     beginShape();
     for (let i = 0; i < this.sides; i++) {
-      let angle = map(i, 0, this.sides, 0, TWO_PI);
-      vertex(cos(angle) * 15, sin(angle) * 15);
+      const angle = map(i, 0, this.sides, 0, TWO_PI);
+      vertex(cos(angle) * GAME_CONFIG.ALIEN_SIZE, sin(angle) * GAME_CONFIG.ALIEN_SIZE);
     }
     endShape(CLOSE);
     pop();
   }
 }
 
+/**
+ * ThrustParticle class for visual effects
+ */
 class ThrustParticle {
+  /**
+   * Create a new thrust particle
+   * @param {p5.Vector} pos - Initial position
+   * @param {p5.Vector} vel - Initial velocity
+   */
   constructor(pos, vel) {
-    this.pos = pos;
-    this.vel = vel;
-    this.lifespan = 255;
+    this.pos = pos.copy();
+    this.vel = vel.copy();
+    this.lifespan = GAME_CONFIG.THRUST_PARTICLE_LIFESPAN;
   }
 
+  /**
+   * Update particle physics
+   */
   update() {
     this.pos.add(this.vel);
-    this.lifespan -= 5;
+    this.lifespan -= GAME_CONFIG.THRUST_PARTICLE_DECAY;
   }
 
+  /**
+   * Render the particle with fading alpha
+   */
   display() {
     noStroke();
     fill(255, this.lifespan);
@@ -316,8 +780,13 @@ class ThrustParticle {
   }
 }
 
+// === LEGACY FUNCTION COMPATIBILITY ===
+
+/**
+ * Legacy explosion function for backward compatibility
+ * @param {p5.Vector} pos - Position to create explosion
+ * @param {p5.Color} col - Color of explosion particles (optional)
+ */
 function explode(pos, col = color(255, 100, 0)) {
-  for (let i = 0; i < 20; i++) {
-    thrustParticles.push(new ThrustParticle(pos.copy(), p5.Vector.random2D().mult(random(1, 3))));
-  }
+  createExplosion(pos, col);
 }
