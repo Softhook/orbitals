@@ -834,13 +834,3 @@ class ThrustParticle {
   }
 }
 
-// === LEGACY FUNCTION COMPATIBILITY ===
-
-/**
- * Legacy explosion function for backward compatibility
- * @param {p5.Vector} pos - Position to create explosion
- * @param {p5.Color} explosionColor - Color of explosion particles (optional)
- */
-function explode(pos, explosionColor = color(255, 100, 0)) {
-  createExplosion(pos, explosionColor);
-}
