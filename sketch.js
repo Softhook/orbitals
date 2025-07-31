@@ -10,9 +10,10 @@ const GAME_CONFIG = {
   
   // Physics constants
   GRAVITY_STRENGTH: 200,
-  MIN_GRAVITY_DISTANCE: 50, // Increased to prevent objects from getting too close
-  PLANET_SURFACE_BUFFER: 5, // Extra buffer from planet surface
+  MIN_GRAVITY_DISTANCE: 50,
+  PLANET_SURFACE_BUFFER: 5,
   MAX_VELOCITY: 3,
+  GRAVITY_FALLOFF_FACTOR: 0.01, // New: Controls gravity strength at distance
   
   // Player settings
   PLAYER_ROTATION_SPEED: 0.05,
@@ -26,6 +27,7 @@ const GAME_CONFIG = {
   PROJECTILE_SPEED: 4,
   PROJECTILE_SIZE: 6,
   PROJECTILE_HIT_RADIUS: 15,
+  PROJECTILE_LIFETIME: 300, // New: Frames before projectile expires
   
   // Planet settings
   PLANET_COUNT: 3,
@@ -43,7 +45,12 @@ const GAME_CONFIG = {
   // Particle settings
   THRUST_PARTICLE_LIFESPAN: 255,
   THRUST_PARTICLE_DECAY: 5,
-  EXPLOSION_PARTICLE_COUNT: 20
+  EXPLOSION_PARTICLE_COUNT: 20,
+  
+  // Performance settings
+  MAX_PARTICLES: 500, // New: Limit total particles for performance
+  MAX_PROJECTILES: 50, // New: Limit total projectiles
+  MAX_ALIENS: 20 // New: Limit total aliens
 };
 
 // === GAME STATE ===
@@ -125,7 +132,7 @@ function updateAndDrawPlanets() {
     
     // Remove destroyed planets
     if (planet.health <= 0) {
-      createExplosion(planet.pos);
+      createExplosion(planet.pos, color(100, 150, 255)); // Blue explosion for planets
       gameState.planets.splice(i, 1);
     }
   }
@@ -156,7 +163,7 @@ function checkPlayerAlienCollisions(player, playerIndex) {
     if (distance < GAME_CONFIG.ALIEN_PLAYER_HIT_RADIUS) {
       // Apply damage to player
       player.health -= GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
-      createExplosion(player.pos);
+      createExplosion(player.pos, player.color); // Use player's color for explosion
       gameState.aliens.splice(j, 1);
       
       // Remove player if health depleted
@@ -169,9 +176,14 @@ function checkPlayerAlienCollisions(player, playerIndex) {
 }
 
 /**
- * Handle projectile updates, rendering, and collision detection
+ * Handle projectile updates, rendering, and collision detection with performance limits
  */
 function updateAndDrawProjectiles() {
+  // Limit projectile count for performance
+  if (gameState.projectiles.length > GAME_CONFIG.MAX_PROJECTILES) {
+    gameState.projectiles = gameState.projectiles.slice(-GAME_CONFIG.MAX_PROJECTILES);
+  }
+  
   for (let i = gameState.projectiles.length - 1; i >= 0; i--) {
     const projectile = gameState.projectiles[i];
     
@@ -180,8 +192,8 @@ function updateAndDrawProjectiles() {
       continue; // Projectile was destroyed
     }
     
-    // Remove projectiles that leave the screen
-    if (isOffScreen(projectile.pos)) {
+    // Remove projectiles that leave the screen or expire
+    if (isOffScreen(projectile.pos) || projectile.isExpired()) {
       gameState.projectiles.splice(i, 1);
     } else {
       projectile.update();
@@ -202,7 +214,7 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
     const distance = dist(projectile.pos.x, projectile.pos.y, alien.pos.x, alien.pos.y);
     
     if (distance < GAME_CONFIG.PROJECTILE_HIT_RADIUS) {
-      createExplosion(alien.pos);
+      createExplosion(alien.pos, alien.color); // Use alien's color for explosion
       gameState.aliens.splice(j, 1);
       gameState.projectiles.splice(projectileIndex, 1);
       return true; // Projectile destroyed
@@ -235,7 +247,7 @@ function checkAlienPlanetCollisions(alien, alienIndex) {
     
     if (distance < GAME_CONFIG.PLANET_HIT_RADIUS) {
       planet.health -= 1;
-      createExplosion(alien.pos);
+      createExplosion(alien.pos, alien.color); // Use alien's color for explosion
       gameState.aliens.splice(alienIndex, 1);
       break;
     }
@@ -243,10 +255,11 @@ function checkAlienPlanetCollisions(alien, alienIndex) {
 }
 
 /**
- * Spawn new aliens at regular intervals from screen edges
+ * Spawn new aliens at regular intervals from screen edges with population limit
  */
 function spawnAliens() {
-  if (frameCount % GAME_CONFIG.ALIEN_SPAWN_INTERVAL === 0) {
+  if (frameCount % GAME_CONFIG.ALIEN_SPAWN_INTERVAL === 0 && 
+      gameState.aliens.length < GAME_CONFIG.MAX_ALIENS) {
     const spawnPosition = getRandomEdgePosition();
     const alienType = random(["dumb", "planet", "player"]);
     gameState.aliens.push(new Alien(spawnPosition.x, spawnPosition.y, alienType));
@@ -268,9 +281,14 @@ function getRandomEdgePosition() {
 }
 
 /**
- * Handle particle updates and rendering
+ * Handle particle updates and rendering with performance limits
  */
 function updateAndDrawParticles() {
+  // Limit particle count for performance
+  if (gameState.thrustParticles.length > GAME_CONFIG.MAX_PARTICLES) {
+    gameState.thrustParticles = gameState.thrustParticles.slice(-GAME_CONFIG.MAX_PARTICLES);
+  }
+  
   for (let i = gameState.thrustParticles.length - 1; i >= 0; i--) {
     const particle = gameState.thrustParticles[i];
     particle.update();
@@ -297,40 +315,42 @@ function isOffScreen(pos) {
 /**
  * Create an explosion effect at the given position
  * @param {p5.Vector} pos - Position to create explosion
- * @param {p5.Color} col - Color of explosion particles (optional)
+ * @param {p5.Color} explosionColor - Color of explosion particles
  */
-function createExplosion(pos, col = color(255, 100, 0)) {
+function createExplosion(pos, explosionColor = color(255, 100, 0)) {
   for (let i = 0; i < GAME_CONFIG.EXPLOSION_PARTICLE_COUNT; i++) {
     const velocity = p5.Vector.random2D().mult(random(1, 3));
-    gameState.thrustParticles.push(new ThrustParticle(pos.copy(), velocity));
+    gameState.thrustParticles.push(new ThrustParticle(pos.copy(), velocity, explosionColor));
   }
 }
 
 /**
- * Apply gravitational force from planets to an object
+ * Apply gravitational force from planets to an object with improved performance
  * @param {p5.Vector} pos - Position of the object
  * @param {p5.Vector} vel - Velocity vector to modify
  */
 function applyPlanetaryGravity(pos, vel) {
+  const planetRadius = GAME_CONFIG.PLANET_SIZE * 0.5;
+  const safeDistance = planetRadius + GAME_CONFIG.PLANET_SURFACE_BUFFER;
+  
   for (let planet of gameState.planets) {
     const force = p5.Vector.sub(planet.pos, pos);
-    const distance = force.mag();
-    const planetRadius = GAME_CONFIG.PLANET_SIZE / 2;
-    const safeDistance = planetRadius + GAME_CONFIG.PLANET_SURFACE_BUFFER;
+    const distanceSquared = force.magSq(); // More efficient than mag()
+    const distance = Math.sqrt(distanceSquared);
     
-    // Only apply gravity if object is far enough from planet
-    if (distance > GAME_CONFIG.MIN_GRAVITY_DISTANCE) {
-      // If too close to planet surface, apply repulsive force to push away
-      if (distance < safeDistance) {
-        const repulsiveStrength = GAME_CONFIG.GRAVITY_STRENGTH / (distance * distance * 2);
-        force.setMag(-repulsiveStrength); // Negative to push away
-        vel.add(force);
-      } else {
-        // Normal gravitational attraction with reduced strength at close distances
-        const strength = GAME_CONFIG.GRAVITY_STRENGTH / (distance * distance * distance * 0.01);
-        force.setMag(strength);
-        vel.add(force);
-      }
+    // Skip if too close (within minimum gravity range)
+    if (distance <= GAME_CONFIG.MIN_GRAVITY_DISTANCE) continue;
+    
+    if (distance < safeDistance) {
+      // Repulsive force when too close to planet surface
+      const repulsiveStrength = GAME_CONFIG.GRAVITY_STRENGTH / (distanceSquared * 2);
+      force.setMag(-repulsiveStrength);
+      vel.add(force);
+    } else {
+      // Normal gravitational attraction with optimized calculation
+      const strength = GAME_CONFIG.GRAVITY_STRENGTH / (distanceSquared * distance * GAME_CONFIG.GRAVITY_FALLOFF_FACTOR);
+      force.setMag(strength);
+      vel.add(force);
     }
   }
 }
@@ -448,7 +468,8 @@ class Player {
   createThrustParticles() {
     const backPosition = this.getBackPosition();
     const particleVelocity = p5.Vector.fromAngle(this.angle + PI).mult(random(1, 2));
-    gameState.thrustParticles.push(new ThrustParticle(backPosition, particleVelocity));
+    // Use white color for thrust particles
+    gameState.thrustParticles.push(new ThrustParticle(backPosition, particleVelocity, color(255, 255, 255)));
   }
 
   /**
@@ -463,9 +484,14 @@ class Player {
   }
 
   /**
-   * Create and fire a projectile from the ship's tip
+   * Create and fire a projectile from the ship's tip with population limit
    */
   shoot() {
+    // Limit total projectiles for performance
+    if (gameState.projectiles.length >= GAME_CONFIG.MAX_PROJECTILES) {
+      return; // Don't create new projectile if at limit
+    }
+    
     const tipPosition = this.getTipPosition();
     const projectileVelocity = p5.Vector.fromAngle(this.angle).mult(GAME_CONFIG.PROJECTILE_SPEED);
     gameState.projectiles.push(new Projectile(tipPosition, projectileVelocity));
@@ -576,6 +602,7 @@ class Projectile {
   constructor(pos, vel) {
     this.pos = pos.copy();
     this.vel = vel.copy();
+    this.age = 0; // Track projectile age for lifetime management
   }
 
   /**
@@ -587,6 +614,15 @@ class Projectile {
     
     // Update position
     this.pos.add(this.vel);
+    this.age++;
+  }
+
+  /**
+   * Check if projectile has expired
+   * @returns {boolean} - True if projectile should be removed
+   */
+  isExpired() {
+    return this.age > GAME_CONFIG.PROJECTILE_LIFETIME;
   }
 
   /**
@@ -767,11 +803,13 @@ class ThrustParticle {
    * Create a new thrust particle
    * @param {p5.Vector} pos - Initial position
    * @param {p5.Vector} vel - Initial velocity
+   * @param {p5.Color} particleColor - Color of the particle (optional)
    */
-  constructor(pos, vel) {
+  constructor(pos, vel, particleColor = color(255, 255, 255)) {
     this.pos = pos.copy();
     this.vel = vel.copy();
     this.lifespan = GAME_CONFIG.THRUST_PARTICLE_LIFESPAN;
+    this.color = particleColor;
   }
 
   /**
@@ -783,11 +821,15 @@ class ThrustParticle {
   }
 
   /**
-   * Render the particle with fading alpha
+   * Render the particle with fading alpha and custom color
    */
   display() {
     noStroke();
-    fill(255, this.lifespan);
+    // Extract RGB values and apply alpha based on lifespan
+    const r = red(this.color);
+    const g = green(this.color);
+    const b = blue(this.color);
+    fill(r, g, b, this.lifespan);
     ellipse(this.pos.x, this.pos.y, 4);
   }
 }
@@ -797,8 +839,8 @@ class ThrustParticle {
 /**
  * Legacy explosion function for backward compatibility
  * @param {p5.Vector} pos - Position to create explosion
- * @param {p5.Color} col - Color of explosion particles (optional)
+ * @param {p5.Color} explosionColor - Color of explosion particles (optional)
  */
-function explode(pos, col = color(255, 100, 0)) {
-  createExplosion(pos, col);
+function explode(pos, explosionColor = color(255, 100, 0)) {
+  createExplosion(pos, explosionColor);
 }
