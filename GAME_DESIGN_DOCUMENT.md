@@ -1,7 +1,27 @@
 # Space Defenders - Game Design Document (Updated)
 
 ## Overview
-Space Defenders is a multiplayer space combat game featuring realistic gravitational physics, where players pilot spaceships in a universe with planets that exert gravitational forces on all entities. The game features dynamic colored explosions, performance optimization, and balanced gameplay mechanics.
+Space Defenders is a multiplayer space combat game featuring realistic gravitational physics, where players pilot spaceships in a universe with planets that exe### 🤖 **AI System (Enhanced)**
+
+**Population Management**:
+- **Alien Limit**: Maximum 20 aliens simultaneously
+- **Smart Spawning**: Only spawn when below population limit and based on level
+- **Performance**: Prevents entity explosion that could lag the game
+
+**Alien Spawning**:
+- **Base Frequency**: Every 120 frames (2 seconds at 60fps)
+- **Level Scaling**: Spawn rate increases by 10 frames per level
+- **Location**: Random edge of screen
+- **Type**: Random selection from ["dumb", "planet", "player"]
+- **Speed Variance**: Each alien gets ±30% random speed variation
+- **Population Control**: Respects MAX_ALIENS limit
+
+**AI Behaviors**:
+1. **Target Seeking**: Find closest target of appropriate type
+2. **Movement**: Set velocity toward target (with individual speeds)
+3. **Gravity Response**: Affected by planetary forces
+4. **Collision**: Damage targets on contact with colored explosions
+5. **Level Adaptation**: Speed increases with each level progressionorces on all entities. The game features dynamic colored explosions, performance optimization, and balanced gameplay mechanics.
 
 ## Recent Updates & Optimizations
 
@@ -101,31 +121,38 @@ The game follows an optimized game loop pattern implemented in the `draw()` func
 - **← Alien**: Takes damage from alien collisions
 - **→ ThrustParticle**: Creates explosion when destroyed
 
-### 4. **Alien Class** 👾
-**Purpose**: Enemy entities with different AI behaviors
+### **4. Alien Class** 👾
+**Purpose**: Enemy entities with different AI behaviors, random speeds, and level scaling
 
 **Key Properties**:
 - `pos` - Current position (p5.Vector)
-- `vel` - Current velocity (p5.Vector)
+- `vel` - Current velocity (p5.Vector) with random variance
 - `type` - Behavior type ("dumb", "planet", "player")
 - `sides` - Number of polygon sides (visual indicator)
 - `color` - Type-specific color
+- `targetSpeed` - Individual seeking speed (with variance and level scaling)
 
 **Alien Types**:
 - **"dumb"** (Purple, 6 sides): Random movement
 - **"planet"** (Green, 5 sides): Seeks and attacks planets
 - **"player"** (Red, 4 sides): Seeks and attacks players
 
+**Speed System**:
+- **Base Speed**: Configured value with ±30% random variance
+- **Level Scaling**: 20% speed increase per level
+- **Individual Variation**: Each alien has unique movement characteristics
+
 **Key Methods**:
 - `update()` - AI movement + gravity + position update
-- `seekTarget()` - Move toward closest target of specified type
+- `seekTarget()` - Move toward closest target using individual speed
 - `display()` - Render as colored polygon
 
 **Interactions**:
 - **← Planet**: Affected by gravitational forces AND damages planets
 - **→ Player**: Damages players on collision
-- **← Projectile**: Destroyed by player projectiles
+- **← Projectile**: Destroyed by player projectiles (increments kill counter)
 - **→ ThrustParticle**: Creates explosion when destroyed
+- **→ Level System**: Killing aliens advances game level
 
 ### 5. **ThrustParticle Class** ✨
 **Purpose**: Enhanced visual effects for thrust, explosions, and impacts with custom colors
@@ -211,7 +238,18 @@ The game follows an optimized game loop pattern implemented in the `draw()` func
 **Global Controls**:
 - Mouse Click: Toggle fullscreen mode
 
-### 🤖 **AI System (Enhanced)**
+### 🎮 **Level Progression System**
+- **Advancement**: Kill 10 aliens to advance to next level
+- **Speed Scaling**: Each level increases alien speed by 20%
+- **Spawn Rate**: Aliens spawn 10 frames faster each level (minimum 0.5 seconds)
+- **Visual Feedback**: Yellow particle burst when leveling up
+- **UI Display**: Shows current level, kill progress, and spawn rate
+
+### 📊 **Alien Variability System**
+- **Random Speed**: Each alien gets ±30% speed variation
+- **Individual Stats**: Each alien has unique movement and target speeds
+- **Level Scaling**: All speeds scale with current level
+- **Balanced Difficulty**: Maintains challenge while keeping variety
 
 **Population Management**:
 - **Alien Limit**: Maximum 20 aliens simultaneously
@@ -260,21 +298,26 @@ The game follows an optimized game loop pattern implemented in the `draw()` func
 ```
 GAME_CONFIG (Constants)
     ↓
-gameState (Global State)
+gameState (Global State + Level Progression)
     ├── players[]
     ├── projectiles[]  
     ├── planets[]
-    ├── aliens[]
-    └── thrustParticles[]
+    ├── aliens[] (with individual speeds)
+    ├── thrustParticles[]
+    ├── level (current game level)
+    ├── aliensKilled (progress toward next level)
+    └── totalAliensKilled (total score)
     
 Input Events → Players → Projectiles
                 ↓           ↓
             ThrustParticles  ↓
-                           Aliens (collision)
+                           Aliens (collision → kill counter → level up)
                              ↓
-                        ThrustParticles
+                        ThrustParticles (colored explosions)
                              
 Planets → Gravity → ALL ENTITIES
+
+Level System → Alien Speed/Spawn Rate → Dynamic Difficulty
 ```
 
 ## Collision Matrix
@@ -303,9 +346,15 @@ All game balance is controlled through the enhanced `GAME_CONFIG` object:
 - `MAX_ALIENS`: Alien population limit (20) for balanced gameplay
 - `PROJECTILE_LIFETIME`: Auto-expire bullets after 300 frames
 
+### **Level Progression Settings**:
+- `ALIENS_PER_LEVEL`: Aliens to kill to advance (10)
+- `LEVEL_SPEED_MULTIPLIER`: Speed increase per level (20%)
+- `LEVEL_SPAWN_REDUCTION`: Spawn rate increase per level (10 frames)
+- `ALIEN_SPEED_VARIANCE`: Random speed variation (±30%)
+
 ### **Gameplay Balance**:
 - `PLAYER_SHOT_COOLDOWN`: Rate of fire limitation
-- `ALIEN_SPAWN_INTERVAL`: Enemy spawn frequency
+- `ALIEN_SPAWN_INTERVAL`: Base enemy spawn frequency
 - `MAX_VELOCITY`: Speed limitation for all entities
 
 ### **Visual Settings**:

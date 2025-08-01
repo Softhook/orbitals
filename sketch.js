@@ -41,6 +41,12 @@ const GAME_CONFIG = {
   ALIEN_TARGET_SPEED: 0.3,
   ALIEN_SIZE: 15,
   ALIEN_PLAYER_HIT_RADIUS: 20,
+  ALIEN_SPEED_VARIANCE: 0.3, // New: Random speed variation factor
+  
+  // Level progression settings
+  ALIENS_PER_LEVEL: 10, // New: Aliens to kill to advance level
+  LEVEL_SPEED_MULTIPLIER: 0.2, // New: Speed increase per level
+  LEVEL_SPAWN_REDUCTION: 10, // New: Frames reduced from spawn interval per level
   
   // Particle settings
   THRUST_PARTICLE_LIFESPAN: 255,
@@ -50,7 +56,8 @@ const GAME_CONFIG = {
   // Performance settings
   MAX_PARTICLES: 500, // New: Limit total particles for performance
   MAX_PROJECTILES: 50, // New: Limit total projectiles
-  MAX_ALIENS: 20 // New: Limit total aliens
+  MAX_ALIENS: 20, // New: Base limit for aliens
+  MAX_ALIENS_PER_LEVEL: 3 // New: Additional aliens allowed per level
 };
 
 // === GAME STATE ===
@@ -60,7 +67,13 @@ let gameState = {
   planets: [],
   aliens: [],
   thrustParticles: [],
-  isFullscreen: false
+  isFullscreen: false,
+  // Level progression
+  level: 1,
+  aliensKilled: 0,
+  totalAliensKilled: 0,
+  // Spawn timing
+  lastAlienSpawnFrame: 0
 };
 
 // === MAIN GAME FUNCTIONS ===
@@ -120,6 +133,12 @@ function draw() {
   updateAndDrawAliens();
   spawnAliens();
   updateAndDrawParticles();
+  
+  // Check for level progression
+  checkLevelProgression();
+  
+  // Display game UI
+  displayGameUI();
 }
 
 /**
@@ -165,6 +184,13 @@ function checkPlayerAlienCollisions(player, playerIndex) {
       player.health -= GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
       createExplosion(player.pos, player.color); // Use player's color for explosion
       gameState.aliens.splice(j, 1);
+      
+      // Increment kill counters for level progression
+      gameState.aliensKilled++;
+      gameState.totalAliensKilled++;
+      
+      // Debug log (temporary)
+      console.log(`Alien hit player. Remaining aliens: ${gameState.aliens.length}`);
       
       // Remove player if health depleted
       if (player.health <= 0) {
@@ -217,6 +243,13 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
       createExplosion(alien.pos, alien.color); // Use alien's color for explosion
       gameState.aliens.splice(j, 1);
       gameState.projectiles.splice(projectileIndex, 1);
+      
+      // Increment kill counters
+      gameState.aliensKilled++;
+      gameState.totalAliensKilled++;
+      // Debug log (temporary)
+      console.log(`Projectile killed alien. Remaining aliens: ${gameState.aliens.length}`);
+      
       return true; // Projectile destroyed
     }
   }
@@ -231,6 +264,14 @@ function updateAndDrawAliens() {
     const alien = gameState.aliens[i];
     alien.update();
     alien.display();
+    
+    // Remove aliens that go off-screen (with some buffer)
+    if (isOffScreenWithBuffer(alien.pos)) {
+      gameState.aliens.splice(i, 1);
+      // Debug log (temporary)
+      if (frameCount % 60 === 0) console.log(`Removed off-screen alien. Remaining: ${gameState.aliens.length}`);
+      continue;
+    }
     
     // Check collisions with planets
     checkAlienPlanetCollisions(alien, i);
@@ -249,20 +290,40 @@ function checkAlienPlanetCollisions(alien, alienIndex) {
       planet.health -= 1;
       createExplosion(alien.pos, alien.color); // Use alien's color for explosion
       gameState.aliens.splice(alienIndex, 1);
+      
+      // Increment kill counters for level progression
+      gameState.aliensKilled++;
+      gameState.totalAliensKilled++;
+      
+      // Debug log (temporary)
+      console.log(`Alien hit planet. Remaining aliens: ${gameState.aliens.length}`);
       break;
     }
   }
 }
 
 /**
- * Spawn new aliens at regular intervals from screen edges with population limit
+ * Get current maximum aliens allowed based on level
+ * @returns {number} - Maximum aliens for current level
+ */
+function getCurrentMaxAliens() {
+  return GAME_CONFIG.MAX_ALIENS + (gameState.level - 1) * GAME_CONFIG.MAX_ALIENS_PER_LEVEL;
+}
+
+/**
+ * Spawn new aliens at regular intervals from screen edges with population limit and level scaling
  */
 function spawnAliens() {
-  if (frameCount % GAME_CONFIG.ALIEN_SPAWN_INTERVAL === 0 && 
-      gameState.aliens.length < GAME_CONFIG.MAX_ALIENS) {
+  const currentSpawnInterval = getCurrentSpawnInterval();
+  const maxAliens = getCurrentMaxAliens();
+  
+  // Use frame-based timing instead of modulo to handle level changes properly
+  if (frameCount - gameState.lastAlienSpawnFrame >= currentSpawnInterval && 
+      gameState.aliens.length < maxAliens) {
     const spawnPosition = getRandomEdgePosition();
     const alienType = random(["dumb", "planet", "player"]);
     gameState.aliens.push(new Alien(spawnPosition.x, spawnPosition.y, alienType));
+    gameState.lastAlienSpawnFrame = frameCount;
   }
 }
 
@@ -278,6 +339,94 @@ function getRandomEdgePosition() {
     case 2: return createVector(random(width), height); // Bottom
     case 3: return createVector(0, random(height)); // Left
   }
+}
+
+/**
+ * Check if level should be advanced based on aliens killed
+ */
+function checkLevelProgression() {
+  if (gameState.aliensKilled >= GAME_CONFIG.ALIENS_PER_LEVEL) {
+    gameState.level++;
+    gameState.aliensKilled = 0;
+    
+    // Reset spawn timer to immediately benefit from faster spawn rate
+    gameState.lastAlienSpawnFrame = frameCount - getCurrentSpawnInterval();
+    
+    // Visual feedback for level up
+    createLevelUpEffect();
+  }
+}
+
+/**
+ * Create visual effect when level increases
+ */
+function createLevelUpEffect() {
+  // Create burst of particles at screen center
+  const centerPos = createVector(width / 2, height / 2);
+  for (let i = 0; i < 50; i++) {
+    const velocity = p5.Vector.random2D().mult(random(2, 5));
+    const levelColor = color(255, 255, 0); // Yellow for level up
+    gameState.thrustParticles.push(new ThrustParticle(centerPos, velocity, levelColor));
+  }
+}
+
+/**
+ * Display game UI including level, score, and aliens killed
+ */
+function displayGameUI() {
+  push();
+  fill(255);
+  textSize(16);
+  textAlign(LEFT);
+  
+  // Display level
+  text(`Level: ${gameState.level}`, 10, 25);
+  
+  // Display aliens killed this level
+  text(`Aliens Killed: ${gameState.aliensKilled}/${GAME_CONFIG.ALIENS_PER_LEVEL}`, 10, 45);
+  
+  // Display total aliens killed
+  text(`Total Killed: ${gameState.totalAliensKilled}`, 10, 65);
+  
+  // Display current alien spawn rate with clearer formatting
+  const currentSpawnInterval = getCurrentSpawnInterval();
+  const spawnRate = (60 / currentSpawnInterval).toFixed(1);
+  text(`Spawn Rate: ${spawnRate}/sec (${currentSpawnInterval} frames)`, 10, 85);
+  
+  // Display speed multiplier
+  const speedMultiplier = getCurrentSpeedMultiplier().toFixed(1);
+  text(`Speed Multiplier: ${speedMultiplier}x`, 10, 105);
+  
+  // Display alien population info with debug details
+  const maxAliens = getCurrentMaxAliens();
+  text(`Aliens: ${gameState.aliens.length}/${maxAliens}`, 10, 125);
+  
+  // Debug: Show how many aliens were created this frame (temporary)
+  if (frameCount - gameState.lastAlienSpawnFrame === 0) {
+    fill(0, 255, 0);
+    text("ALIEN SPAWNED!", 10, 145);
+    fill(255);
+  }
+  
+  pop();
+}
+
+/**
+ * Get current spawn interval based on level
+ * @returns {number} - Current spawn interval in frames
+ */
+function getCurrentSpawnInterval() {
+  const reduction = (gameState.level - 1) * GAME_CONFIG.LEVEL_SPAWN_REDUCTION;
+  const interval = Math.max(30, GAME_CONFIG.ALIEN_SPAWN_INTERVAL - reduction); // Minimum 30 frames (0.5 sec)
+  return interval;
+}
+
+/**
+ * Get current alien speed multiplier based on level
+ * @returns {number} - Speed multiplier for current level
+ */
+function getCurrentSpeedMultiplier() {
+  return 1 + (gameState.level - 1) * GAME_CONFIG.LEVEL_SPEED_MULTIPLIER;
 }
 
 /**
@@ -310,6 +459,16 @@ function updateAndDrawParticles() {
  */
 function isOffScreen(pos) {
   return pos.x < 0 || pos.x > width || pos.y < 0 || pos.y > height;
+}
+
+/**
+ * Check if a position is outside the screen boundaries with buffer for larger entities
+ * @param {p5.Vector} pos - Position to check
+ * @returns {boolean} - True if position is off screen beyond buffer
+ */
+function isOffScreenWithBuffer(pos) {
+  const buffer = 50; // Give aliens some buffer before removing them
+  return pos.x < -buffer || pos.x > width + buffer || pos.y < -buffer || pos.y > height + buffer;
 }
 
 /**
@@ -694,10 +853,20 @@ class Alien {
    */
   constructor(x, y, type) {
     this.pos = createVector(x, y);
-    this.vel = p5.Vector.random2D().mult(GAME_CONFIG.ALIEN_BASE_SPEED);
+    
+    // Calculate speed with random variance and level scaling
+    const baseSpeed = GAME_CONFIG.ALIEN_BASE_SPEED;
+    const speedMultiplier = getCurrentSpeedMultiplier();
+    const randomVariance = random(1 - GAME_CONFIG.ALIEN_SPEED_VARIANCE, 1 + GAME_CONFIG.ALIEN_SPEED_VARIANCE);
+    const finalSpeed = baseSpeed * speedMultiplier * randomVariance;
+    
+    this.vel = p5.Vector.random2D().mult(finalSpeed);
     this.type = type;
     this.sides = this.getSidesForType(type);
     this.color = this.getColorForType(type);
+    
+    // Store individual speed for target seeking
+    this.targetSpeed = GAME_CONFIG.ALIEN_TARGET_SPEED * speedMultiplier * randomVariance;
   }
 
   /**
@@ -755,7 +924,7 @@ class Alien {
     const target = findClosestTarget(this.pos, targets);
     if (target) {
       const direction = p5.Vector.sub(target.pos, this.pos);
-      direction.setMag(GAME_CONFIG.ALIEN_TARGET_SPEED);
+      direction.setMag(this.targetSpeed); // Use individual target speed
       this.vel = direction;
     }
   }
