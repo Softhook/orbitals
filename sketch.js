@@ -867,6 +867,10 @@ class Alien {
     
     // Store individual speed for target seeking
     this.targetSpeed = GAME_CONFIG.ALIEN_TARGET_SPEED * speedMultiplier * randomVariance;
+    
+    // Rotation properties
+    this.rotation = random(TWO_PI); // Random starting rotation
+    this.rotationSpeed = random(-0.02, 0.02) * speedMultiplier; // Random rotation direction and speed scaled by level
   }
 
   /**
@@ -902,6 +906,7 @@ class Alien {
     this.updateMovement();
     this.applyGravity();
     this.updatePosition();
+    this.updateRotation();
   }
 
   /**
@@ -944,11 +949,19 @@ class Alien {
   }
 
   /**
+   * Update rotation animation
+   */
+  updateRotation() {
+    this.rotation += this.rotationSpeed;
+  }
+
+  /**
    * Render the alien as a colored polygon
    */
   display() {
     push();
     translate(this.pos.x, this.pos.y);
+    rotate(this.rotation);
     fill(this.color);
     stroke(255);
     strokeWeight(1);
