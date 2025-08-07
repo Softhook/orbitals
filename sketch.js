@@ -24,7 +24,7 @@ const GAME_CONFIG = {
   COLLISION_DAMAGE_TO_PLAYER: 10,
   
   // Projectile settings
-  PROJECTILE_SPEED: 4,
+  PROJECTILE_SPEED: 6,
   PROJECTILE_SIZE: 6,
   PROJECTILE_HIT_RADIUS: 15,
   PROJECTILE_LIFETIME: 300, // New: Frames before projectile expires
@@ -34,6 +34,7 @@ const GAME_CONFIG = {
   PLANET_SIZE: 40,
   PLANET_MAX_HEALTH: 10,
   PLANET_HIT_RADIUS: 30,
+  PLANET_MARGIN: 200, // Margin from screen edges where planets can be placed
   
   // Alien settings
   ALIEN_SPAWN_INTERVAL: 120, // frames
@@ -57,7 +58,33 @@ const GAME_CONFIG = {
   MAX_PARTICLES: 500, // New: Limit total particles for performance
   MAX_PROJECTILES: 50, // New: Limit total projectiles
   MAX_ALIENS: 20, // New: Base limit for aliens
-  MAX_ALIENS_PER_LEVEL: 3 // New: Additional aliens allowed per level
+  MAX_ALIENS_PER_LEVEL: 3, // New: Additional aliens allowed per level
+  
+  // Powerup settings
+  POWERUP_SPAWN_CHANCE: 0.3, // Chance for alien to drop powerup when killed
+  POWERUP_SIZE: 20,
+  POWERUP_LIFETIME: 1800, // Frames before powerup disappears (30 seconds at 60fps)
+  POWERUP_COLLECTION_RADIUS: 25,
+  POWERUP_PULSE_SPEED: 0.1 // Speed of size pulsing animation
+};
+
+// === POWERUP TYPES ===
+const POWERUP_TYPES = {
+  FIRE_RATE: { name: "Rapid Fire", color: [255, 100, 100], symbol: "R", effect: "Increases fire rate" },
+  BULLET_SPEED: { name: "Velocity Boost", color: [100, 255, 100], symbol: "V", effect: "Increases bullet speed" },
+  MULTI_SHOT_2: { name: "Double Shot", color: [100, 100, 255], symbol: "2", effect: "Fires 2 bullets" },
+  MULTI_SHOT_3: { name: "Triple Shot", color: [255, 255, 100], symbol: "3", effect: "Fires 3 bullets" },
+  MULTI_SHOT_4: { name: "Quad Shot", color: [255, 100, 255], symbol: "4", effect: "Fires 4 bullets" },
+  BULLET_SIZE: { name: "Big Bullets", color: [255, 150, 0], symbol: "B", effect: "Increases bullet size" },
+  HEALTH_BOOST: { name: "Health Pack", color: [0, 255, 0], symbol: "+", effect: "Restores health" },
+  SHIELD: { name: "Energy Shield", color: [0, 255, 255], symbol: "S", effect: "Temporary invincibility" },
+  THRUST_POWER: { name: "Turbo Thrust", color: [255, 200, 0], symbol: "T", effect: "Increases thrust power" },
+  GRAVITY_IMMUNITY: { name: "Anti-Gravity", color: [200, 0, 255], symbol: "G", effect: "Immune to gravity" },
+  PENETRATING_SHOTS: { name: "Piercing Bullets", color: [255, 0, 0], symbol: "P", effect: "Bullets pierce through aliens" },
+  EXPLOSIVE_SHOTS: { name: "Explosive Rounds", color: [255, 100, 0], symbol: "E", effect: "Bullets explode on impact" },
+  HOMING_MISSILES: { name: "Seeking Missiles", color: [150, 255, 150], symbol: "H", effect: "Bullets track enemies" },
+  TIME_SLOW: { name: "Chronos Field", color: [100, 200, 255], symbol: "C", effect: "Slows down enemies" },
+  DAMAGE_MULTIPLIER: { name: "Power Amplifier", color: [255, 50, 150], symbol: "D", effect: "Increases damage" }
 };
 
 // === GAME STATE ===
@@ -67,6 +94,7 @@ let gameState = {
   planets: [],
   aliens: [],
   thrustParticles: [],
+  powerups: [], // New: Array to store active powerups
   isFullscreen: false,
   // Level progression
   level: 1,
@@ -116,7 +144,29 @@ function initializePlayers() {
  */
 function initializePlanets() {
   for (let i = 0; i < GAME_CONFIG.PLANET_COUNT; i++) {
-    gameState.planets.push(new Planet(random(width), random(height)));
+    gameState.planets.push(new Planet(getRandomPlanetPosition().x, getRandomPlanetPosition().y));
+  }
+}
+
+/**
+ * Get a random position for planet placement with margins from screen edges
+ * @returns {p5.Vector} - Random position within screen bounds with margins
+ */
+function getRandomPlanetPosition() {
+  const margin = GAME_CONFIG.PLANET_MARGIN;
+  const x = random(margin, width - margin);
+  const y = random(margin, height - margin);
+  return createVector(x, y);
+}
+
+/**
+ * Reposition all existing planets after window resize
+ */
+function repositionPlanets() {
+  for (let planet of gameState.planets) {
+    const newPos = getRandomPlanetPosition();
+    planet.pos.x = newPos.x;
+    planet.pos.y = newPos.y;
   }
 }
 
@@ -131,6 +181,7 @@ function draw() {
   updateAndDrawPlayers();
   updateAndDrawProjectiles();
   updateAndDrawAliens();
+  updateAndDrawPowerups();
   spawnAliens();
   updateAndDrawParticles();
   
@@ -183,6 +234,12 @@ function checkPlayerAlienCollisions(player, playerIndex) {
       // Apply damage to player
       player.health -= GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
       createExplosion(player.pos, player.color); // Use player's color for explosion
+      
+      // Chance to spawn powerup before removing alien
+      if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
+        spawnPowerup(alien.pos.x, alien.pos.y);
+      }
+      
       gameState.aliens.splice(j, 1);
       
       // Increment kill counters for level progression
@@ -241,6 +298,12 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
     
     if (distance < GAME_CONFIG.PROJECTILE_HIT_RADIUS) {
       createExplosion(alien.pos, alien.color); // Use alien's color for explosion
+      
+      // Chance to spawn powerup before removing alien
+      if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
+        spawnPowerup(alien.pos.x, alien.pos.y);
+      }
+      
       gameState.aliens.splice(j, 1);
       gameState.projectiles.splice(projectileIndex, 1);
       
@@ -289,6 +352,12 @@ function checkAlienPlanetCollisions(alien, alienIndex) {
     if (distance < GAME_CONFIG.PLANET_HIT_RADIUS) {
       planet.health -= 1;
       createExplosion(alien.pos, alien.color); // Use alien's color for explosion
+      
+      // Chance to spawn powerup before removing alien
+      if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
+        spawnPowerup(alien.pos.x, alien.pos.y);
+      }
+      
       gameState.aliens.splice(alienIndex, 1);
       
       // Increment kill counters for level progression
@@ -548,6 +617,101 @@ function mousePressed() {
  */
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
+  repositionPlanets();
+}
+
+// === POWERUP SYSTEM ===
+
+/**
+ * Handle powerup updates, rendering, and collection
+ */
+function updateAndDrawPowerups() {
+  for (let i = gameState.powerups.length - 1; i >= 0; i--) {
+    const powerup = gameState.powerups[i];
+    powerup.update();
+    powerup.display();
+    
+    // Check for collection by players
+    for (let player of gameState.players) {
+      const distance = dist(player.pos.x, player.pos.y, powerup.pos.x, powerup.pos.y);
+      if (distance < GAME_CONFIG.POWERUP_COLLECTION_RADIUS) {
+        applyPowerupToPlayer(player, powerup.type);
+        gameState.powerups.splice(i, 1);
+        break;
+      }
+    }
+    
+    // Remove expired powerups
+    if (powerup.age > GAME_CONFIG.POWERUP_LIFETIME) {
+      gameState.powerups.splice(i, 1);
+    }
+  }
+}
+
+/**
+ * Spawn a random powerup at specified position
+ * @param {number} x - X position
+ * @param {number} y - Y position
+ */
+function spawnPowerup(x, y) {
+  const types = Object.keys(POWERUP_TYPES);
+  const randomType = types[floor(random(types.length))];
+  gameState.powerups.push(new Powerup(x, y, randomType));
+}
+
+/**
+ * Apply powerup effects to a player
+ * @param {Player} player - Player to apply effects to
+ * @param {string} type - Type of powerup
+ */
+function applyPowerupToPlayer(player, type) {
+  switch (type) {
+    case 'FIRE_RATE':
+      player.powerups.fireRate = min(3.0, player.powerups.fireRate + 0.3);
+      break;
+    case 'BULLET_SPEED':
+      player.powerups.bulletSpeed = min(3.0, player.powerups.bulletSpeed + 0.4);
+      break;
+    case 'MULTI_SHOT_2':
+      player.powerups.multiShot = max(2, player.powerups.multiShot);
+      break;
+    case 'MULTI_SHOT_3':
+      player.powerups.multiShot = max(3, player.powerups.multiShot);
+      break;
+    case 'MULTI_SHOT_4':
+      player.powerups.multiShot = max(4, player.powerups.multiShot);
+      break;
+    case 'BULLET_SIZE':
+      player.powerups.bulletSize = min(2.5, player.powerups.bulletSize + 0.3);
+      break;
+    case 'HEALTH_BOOST':
+      player.health = min(GAME_CONFIG.PLAYER_MAX_HEALTH, player.health + 30);
+      break;
+    case 'SHIELD':
+      player.powerups.shield = 600; // 10 seconds at 60fps
+      break;
+    case 'THRUST_POWER':
+      player.powerups.thrustPower = min(2.0, player.powerups.thrustPower + 0.3);
+      break;
+    case 'GRAVITY_IMMUNITY':
+      player.powerups.gravityImmunity = 900; // 15 seconds
+      break;
+    case 'PENETRATING_SHOTS':
+      player.powerups.penetratingShots = 1200; // 20 seconds
+      break;
+    case 'EXPLOSIVE_SHOTS':
+      player.powerups.explosiveShots = 1200; // 20 seconds
+      break;
+    case 'HOMING_MISSILES':
+      player.powerups.homingMissiles = 1800; // 30 seconds
+      break;
+    case 'TIME_SLOW':
+      player.powerups.timeSlowField = 600; // 10 seconds
+      break;
+    case 'DAMAGE_MULTIPLIER':
+      player.powerups.damageMultiplier = min(3.0, player.powerups.damageMultiplier + 0.5);
+      break;
+  }
 }
 
 // === GAME CLASSES ===
@@ -578,6 +742,22 @@ class Player {
     this.health = GAME_CONFIG.PLAYER_MAX_HEALTH;
     this.color = color(random(100, 255), random(100, 255), random(100, 255));
     this.lastShotTime = 0;
+    
+    // Powerup effects
+    this.powerups = {
+      fireRate: 1.0,           // Multiplier for fire rate
+      bulletSpeed: 1.0,        // Multiplier for bullet speed  
+      multiShot: 1,            // Number of bullets to fire
+      bulletSize: 1.0,         // Multiplier for bullet size
+      thrustPower: 1.0,        // Multiplier for thrust power
+      gravityImmunity: 0,      // Duration of anti-gravity effect
+      shield: 0,               // Duration of invincibility
+      penetratingShots: 0,     // Duration of piercing bullets
+      explosiveShots: 0,       // Duration of explosive bullets
+      homingMissiles: 0,       // Duration of seeking missiles
+      timeSlowField: 0,        // Duration of enemy slowdown
+      damageMultiplier: 1.0    // Damage multiplier
+    };
   }
 
   /**
@@ -587,6 +767,20 @@ class Player {
     this.handleInput();
     this.applyPhysics();
     this.constrainToScreen();
+    this.updatePowerups();
+  }
+
+  /**
+   * Update powerup timers and effects
+   */
+  updatePowerups() {
+    // Decrement timed powerups
+    if (this.powerups.shield > 0) this.powerups.shield--;
+    if (this.powerups.gravityImmunity > 0) this.powerups.gravityImmunity--;
+    if (this.powerups.penetratingShots > 0) this.powerups.penetratingShots--;
+    if (this.powerups.explosiveShots > 0) this.powerups.explosiveShots--;
+    if (this.powerups.homingMissiles > 0) this.powerups.homingMissiles--;
+    if (this.powerups.timeSlowField > 0) this.powerups.timeSlowField--;
   }
 
   /**
@@ -614,10 +808,11 @@ class Player {
   }
 
   /**
-   * Apply thrust force in the direction the ship is facing
+   * Apply thrust force in the direction the ship is facing with powerup multiplier
    */
   applyThrust() {
-    const thrustVector = p5.Vector.fromAngle(this.angle).mult(GAME_CONFIG.PLAYER_THRUST_FORCE);
+    const thrustForce = GAME_CONFIG.PLAYER_THRUST_FORCE * this.powerups.thrustPower;
+    const thrustVector = p5.Vector.fromAngle(this.angle).mult(thrustForce);
     this.acc.add(thrustVector);
   }
 
@@ -636,14 +831,15 @@ class Player {
    */
   tryToShoot() {
     const currentTime = millis();
-    if (currentTime - this.lastShotTime > GAME_CONFIG.PLAYER_SHOT_COOLDOWN) {
+    const adjustedCooldown = GAME_CONFIG.PLAYER_SHOT_COOLDOWN / this.powerups.fireRate;
+    if (currentTime - this.lastShotTime > adjustedCooldown) {
       this.shoot();
       this.lastShotTime = currentTime;
     }
   }
 
   /**
-   * Create and fire a projectile from the ship's tip with population limit
+   * Create and fire projectile(s) from the ship's tip with powerup effects
    */
   shoot() {
     // Limit total projectiles for performance
@@ -652,16 +848,43 @@ class Player {
     }
     
     const tipPosition = this.getTipPosition();
-    const projectileVelocity = p5.Vector.fromAngle(this.angle).mult(GAME_CONFIG.PROJECTILE_SPEED);
-    gameState.projectiles.push(new Projectile(tipPosition, projectileVelocity));
+    const baseSpeed = GAME_CONFIG.PROJECTILE_SPEED * this.powerups.bulletSpeed;
+    
+    // Handle multi-shot powerups
+    const shots = this.powerups.multiShot;
+    const spreadAngle = shots > 1 ? PI / 6 : 0; // 30 degree spread for multi-shot
+    
+    for (let i = 0; i < shots; i++) {
+      let shootAngle = this.angle;
+      
+      if (shots > 1) {
+        // Spread bullets evenly
+        const angleOffset = map(i, 0, shots - 1, -spreadAngle, spreadAngle);
+        shootAngle += angleOffset;
+      }
+      
+      const projectileVelocity = p5.Vector.fromAngle(shootAngle).mult(baseSpeed);
+      const projectile = new Projectile(tipPosition, projectileVelocity);
+      
+      // Apply powerup effects to projectile
+      projectile.size *= this.powerups.bulletSize;
+      projectile.penetrating = this.powerups.penetratingShots > 0;
+      projectile.explosive = this.powerups.explosiveShots > 0;
+      projectile.homing = this.powerups.homingMissiles > 0;
+      projectile.damage = this.powerups.damageMultiplier;
+      
+      gameState.projectiles.push(projectile);
+    }
   }
 
   /**
    * Apply physics including gravity and movement
    */
   applyPhysics() {
-    // Apply planetary gravity
-    applyPlanetaryGravity(this.pos, this.acc);
+    // Apply planetary gravity (unless immune)
+    if (this.powerups.gravityImmunity <= 0) {
+      applyPlanetaryGravity(this.pos, this.acc);
+    }
     
     // Update velocity and position
     this.vel.add(this.acc);
@@ -699,11 +922,41 @@ class Player {
   }
 
   /**
-   * Render the player ship and health bar
+   * Render the player ship, health bar, and powerup effects
    */
   display() {
     this.drawShip();
     this.drawHealthBar();
+    this.drawPowerupEffects();
+  }
+
+  /**
+   * Draw visual indicators for active powerup effects
+   */
+  drawPowerupEffects() {
+    push();
+    translate(this.pos.x, this.pos.y);
+    
+    // Shield effect
+    if (this.powerups.shield > 0) {
+      noFill();
+      stroke(0, 255, 255, 150);
+      strokeWeight(3);
+      const shieldRadius = GAME_CONFIG.PLAYER_SIZE * 2;
+      ellipse(0, 0, shieldRadius);
+    }
+    
+    // Anti-gravity effect
+    if (this.powerups.gravityImmunity > 0) {
+      noFill();
+      stroke(200, 0, 255, 100);
+      strokeWeight(2);
+      for (let r = 20; r <= 30; r += 5) {
+        ellipse(0, 0, r);
+      }
+    }
+    
+    pop();
   }
 
   /**
@@ -762,6 +1015,13 @@ class Projectile {
     this.pos = pos.copy();
     this.vel = vel.copy();
     this.age = 0; // Track projectile age for lifetime management
+    
+    // Powerup properties
+    this.size = GAME_CONFIG.PROJECTILE_SIZE;
+    this.penetrating = false;
+    this.explosive = false;
+    this.homing = false;
+    this.damage = 1.0;
   }
 
   /**
@@ -785,12 +1045,32 @@ class Projectile {
   }
 
   /**
-   * Render the projectile as a yellow circle
+   * Render the projectile with powerup effects
    */
   display() {
-    fill(255, 200, 0);
+    push();
+    
+    // Different colors based on powerup effects
+    if (this.explosive) {
+      fill(255, 100, 0); // Orange for explosive
+    } else if (this.penetrating) {
+      fill(255, 0, 100); // Pink for penetrating
+    } else if (this.homing) {
+      fill(0, 255, 100); // Green for homing
+    } else {
+      fill(255, 200, 0); // Default yellow
+    }
+    
     noStroke();
-    ellipse(this.pos.x, this.pos.y, GAME_CONFIG.PROJECTILE_SIZE);
+    ellipse(this.pos.x, this.pos.y, this.size);
+    
+    // Add glow effect for special bullets
+    if (this.explosive || this.penetrating || this.homing) {
+      fill(255, 255, 255, 50);
+      ellipse(this.pos.x, this.pos.y, this.size * 1.5);
+    }
+    
+    pop();
   }
 }
 
@@ -1013,6 +1293,65 @@ class ThrustParticle {
     const b = blue(this.color);
     fill(r, g, b, this.lifespan);
     ellipse(this.pos.x, this.pos.y, 4);
+  }
+}
+
+/**
+ * Powerup class representing collectible items that enhance player abilities
+ */
+class Powerup {
+  /**
+   * Create a new powerup
+   * @param {number} x - X position
+   * @param {number} y - Y position
+   * @param {string} type - Type of powerup from POWERUP_TYPES
+   */
+  constructor(x, y, type) {
+    this.pos = createVector(x, y);
+    this.type = type;
+    this.age = 0;
+    this.pulseOffset = random(TWO_PI);
+  }
+
+  /**
+   * Update powerup age and physics
+   */
+  update() {
+    this.age++;
+  }
+
+  /**
+   * Render the powerup with pulsing animation
+   */
+  display() {
+    const config = POWERUP_TYPES[this.type];
+    if (!config) return;
+
+    push();
+    translate(this.pos.x, this.pos.y);
+    
+    // Pulsing size animation
+    const pulseScale = 1 + 0.2 * sin(this.age * GAME_CONFIG.POWERUP_PULSE_SPEED + this.pulseOffset);
+    const currentSize = GAME_CONFIG.POWERUP_SIZE * pulseScale;
+    
+    // Fade out as it expires
+    const timeLeft = GAME_CONFIG.POWERUP_LIFETIME - this.age;
+    const alpha = timeLeft < 300 ? map(timeLeft, 0, 300, 0, 255) : 255;
+    
+    // Draw powerup background
+    fill(config.color[0], config.color[1], config.color[2], alpha);
+    stroke(255, alpha);
+    strokeWeight(2);
+    ellipse(0, 0, currentSize);
+    
+    // Draw powerup symbol
+    fill(255, alpha);
+    noStroke();
+    textAlign(CENTER, CENTER);
+    textSize(currentSize * 0.6);
+    text(config.symbol, 0, 0);
+    
+    pop();
   }
 }
 
