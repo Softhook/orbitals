@@ -231,8 +231,10 @@ function checkPlayerAlienCollisions(player, playerIndex) {
     const distance = dist(player.pos.x, player.pos.y, alien.pos.x, alien.pos.y);
     
     if (distance < GAME_CONFIG.ALIEN_PLAYER_HIT_RADIUS) {
-      // Apply damage to player
-      player.health -= GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
+      // Apply damage to player (unless shielded)
+      if (player.powerups.shield <= 0) {
+        player.health -= GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
+      }
       createExplosion(player.pos, player.color); // Use player's color for explosion
       
       // Chance to spawn powerup before removing alien
@@ -305,7 +307,16 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
       }
       
       gameState.aliens.splice(j, 1);
-      gameState.projectiles.splice(projectileIndex, 1);
+      
+      // Handle explosive bullets
+      if (projectile.explosive) {
+        createExplosiveDamage(alien.pos, 60); // 60 pixel explosion radius
+      }
+      
+      // Only destroy projectile if it's not penetrating
+      if (!projectile.penetrating) {
+        gameState.projectiles.splice(projectileIndex, 1);
+      }
       
       // Increment kill counters
       gameState.aliensKilled++;
@@ -313,7 +324,7 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
       // Debug log (temporary)
       console.log(`Projectile killed alien. Remaining aliens: ${gameState.aliens.length}`);
       
-      return true; // Projectile destroyed
+      return !projectile.penetrating; // Return true if projectile was destroyed
     }
   }
   return false; // Projectile still exists
@@ -323,9 +334,12 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
  * Handle alien updates, rendering, and collision with planets
  */
 function updateAndDrawAliens() {
+  // Check if any player has time slow active
+  const timeSlowActive = gameState.players.some(player => player.powerups.timeSlowField > 0);
+  
   for (let i = gameState.aliens.length - 1; i >= 0; i--) {
     const alien = gameState.aliens[i];
-    alien.update();
+    alien.update(timeSlowActive);
     alien.display();
     
     // Remove aliens that go off-screen (with some buffer)
@@ -631,18 +645,21 @@ function updateAndDrawPowerups() {
     powerup.update();
     powerup.display();
     
+    let collected = false;
+    
     // Check for collection by players
     for (let player of gameState.players) {
       const distance = dist(player.pos.x, player.pos.y, powerup.pos.x, powerup.pos.y);
       if (distance < GAME_CONFIG.POWERUP_COLLECTION_RADIUS) {
         applyPowerupToPlayer(player, powerup.type);
         gameState.powerups.splice(i, 1);
+        collected = true;
         break;
       }
     }
     
-    // Remove expired powerups
-    if (powerup.age > GAME_CONFIG.POWERUP_LIFETIME) {
+    // Remove expired powerups (only if not collected)
+    if (!collected && powerup.age > GAME_CONFIG.POWERUP_LIFETIME) {
       gameState.powerups.splice(i, 1);
     }
   }
@@ -711,6 +728,31 @@ function applyPowerupToPlayer(player, type) {
     case 'DAMAGE_MULTIPLIER':
       player.powerups.damageMultiplier = min(3.0, player.powerups.damageMultiplier + 0.5);
       break;
+  }
+}
+
+/**
+ * Create explosive damage in an area
+ * @param {p5.Vector} center - Center of explosion
+ * @param {number} radius - Explosion radius
+ */
+function createExplosiveDamage(center, radius) {
+  for (let i = gameState.aliens.length - 1; i >= 0; i--) {
+    const alien = gameState.aliens[i];
+    const distance = p5.Vector.dist(center, alien.pos);
+    
+    if (distance < radius) {
+      createExplosion(alien.pos, alien.color);
+      
+      // Chance to spawn powerup
+      if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
+        spawnPowerup(alien.pos.x, alien.pos.y);
+      }
+      
+      gameState.aliens.splice(i, 1);
+      gameState.aliensKilled++;
+      gameState.totalAliensKilled++;
+    }
   }
 }
 
@@ -1025,9 +1067,32 @@ class Projectile {
   }
 
   /**
-   * Update projectile physics
+   * Update projectile physics with powerup effects
    */
   update() {
+    // Homing behavior - seek nearest alien
+    if (this.homing && gameState.aliens.length > 0) {
+      let closestAlien = null;
+      let closestDistance = Infinity;
+      
+      for (let alien of gameState.aliens) {
+        const distance = p5.Vector.dist(this.pos, alien.pos);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestAlien = alien;
+        }
+      }
+      
+      if (closestAlien) {
+        const steer = p5.Vector.sub(closestAlien.pos, this.pos);
+        steer.normalize();
+        steer.mult(0.1); // Homing strength
+        this.vel.add(steer);
+        this.vel.normalize();
+        this.vel.mult(GAME_CONFIG.PROJECTILE_SPEED);
+      }
+    }
+    
     // Apply planetary gravity to projectiles
     applyPlanetaryGravity(this.pos, this.vel);
     
@@ -1181,12 +1246,15 @@ class Alien {
 
   /**
    * Update alien movement and physics
+   * @param {boolean} timeSlowed - Whether time slow effect is active
    */
-  update() {
+  update(timeSlowed = false) {
+    const speedMultiplier = timeSlowed ? 0.3 : 1.0; // Slow to 30% speed
+    
     this.updateMovement();
     this.applyGravity();
-    this.updatePosition();
-    this.updateRotation();
+    this.updatePosition(speedMultiplier);
+    this.updateRotation(speedMultiplier);
   }
 
   /**
@@ -1222,17 +1290,20 @@ class Alien {
   }
 
   /**
-   * Update position based on velocity
+   * Update position based on velocity with optional speed multiplier
+   * @param {number} speedMultiplier - Speed multiplier for time effects
    */
-  updatePosition() {
-    this.pos.add(this.vel);
+  updatePosition(speedMultiplier = 1.0) {
+    const adjustedVel = p5.Vector.mult(this.vel, speedMultiplier);
+    this.pos.add(adjustedVel);
   }
 
   /**
-   * Update rotation animation
+   * Update rotation animation with optional speed multiplier
+   * @param {number} speedMultiplier - Speed multiplier for time effects
    */
-  updateRotation() {
-    this.rotation += this.rotationSpeed;
+  updateRotation(speedMultiplier = 1.0) {
+    this.rotation += this.rotationSpeed * speedMultiplier;
   }
 
   /**
