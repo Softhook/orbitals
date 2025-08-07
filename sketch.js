@@ -61,7 +61,7 @@ const GAME_CONFIG = {
   MAX_ALIENS_PER_LEVEL: 3, // New: Additional aliens allowed per level
   
   // Powerup settings
-  POWERUP_SPAWN_CHANCE: 0.3, // Chance for alien to drop powerup when killed
+  POWERUP_SPAWN_CHANCE: 0.2, // Chance for alien to drop powerup when killed
   POWERUP_SIZE: 20,
   POWERUP_LIFETIME: 1800, // Frames before powerup disappears (30 seconds at 60fps)
   POWERUP_COLLECTION_RADIUS: 25,
@@ -96,6 +96,7 @@ let gameState = {
   thrustParticles: [],
   powerups: [], // New: Array to store active powerups
   isFullscreen: false,
+  gameOver: false, // New: Game over state
   // Level progression
   level: 1,
   aliensKilled: 0,
@@ -176,6 +177,11 @@ function repositionPlanets() {
 function draw() {
   background(GAME_CONFIG.BACKGROUND_COLOR);
   
+  if (gameState.gameOver) {
+    displayGameOver();
+    return;
+  }
+  
   // Process all game entities in order
   updateAndDrawPlanets();
   updateAndDrawPlayers();
@@ -205,6 +211,11 @@ function updateAndDrawPlanets() {
       createExplosion(planet.pos, color(100, 150, 255)); // Blue explosion for planets
       gameState.planets.splice(i, 1);
     }
+  }
+  
+  // Check for game over condition
+  if (gameState.planets.length === 0 && !gameState.gameOver) {
+    gameState.gameOver = true;
   }
 }
 
@@ -495,6 +506,65 @@ function displayGameUI() {
 }
 
 /**
+ * Display game over screen with restart option
+ */
+function displayGameOver() {
+  push();
+  
+  // Semi-transparent overlay
+  fill(0, 0, 0, 150);
+  rect(0, 0, width, height);
+  
+  // Game Over text
+  fill(255, 100, 100);
+  textAlign(CENTER, CENTER);
+  textSize(64);
+  text("GAME OVER", width / 2, height / 2 - 60);
+  
+  // Subtitle
+  fill(255);
+  textSize(24);
+  text("All planets have been destroyed!", width / 2, height / 2 - 10);
+  
+  // Final stats
+  textSize(18);
+  text(`Final Level: ${gameState.level}`, width / 2, height / 2 + 30);
+  text(`Total Aliens Killed: ${gameState.totalAliensKilled}`, width / 2, height / 2 + 55);
+  
+  // Restart instruction
+  fill(255, 255, 100);
+  textSize(20);
+  text("Press R to Restart", width / 2, height / 2 + 100);
+  
+  pop();
+}
+
+/**
+ * Reset the game to initial state
+ */
+function restartGame() {
+  // Reset game state
+  gameState = {
+    players: [],
+    projectiles: [],
+    planets: [],
+    aliens: [],
+    thrustParticles: [],
+    powerups: [],
+    isFullscreen: false,
+    gameOver: false,
+    level: 1,
+    aliensKilled: 0,
+    totalAliensKilled: 0,
+    lastAlienSpawnFrame: 0
+  };
+  
+  // Reinitialize game elements
+  initializePlayers();
+  initializePlanets();
+}
+
+/**
  * Get current spawn interval based on level
  * @returns {number} - Current spawn interval in frames
  */
@@ -624,6 +694,31 @@ function mousePressed() {
     gameState.isFullscreen = true;
   }
   return false; // Prevent default behavior
+}
+
+/**
+ * Handle keyboard input for game controls
+ */
+function keyPressed() {
+  // Restart game on 'R' key when game is over
+  if (gameState.gameOver && (key === 'r' || key === 'R')) {
+    restartGame();
+    return false;
+  }
+  
+  // Toggle fullscreen on F11
+  if (keyCode === 122) { // F11 key code
+    if (!gameState.isFullscreen) {
+      fullscreen(true);
+      gameState.isFullscreen = true;
+    } else {
+      fullscreen(false);
+      gameState.isFullscreen = false;
+    }
+    return false;
+  }
+  
+  return true;
 }
 
 /**
