@@ -67,6 +67,20 @@ const GAME_CONFIG = {
   POWERUP_COLLECTION_RADIUS: 25,
   POWERUP_PULSE_SPEED: 0.1 // Speed of size pulsing animation
 };
+// === SOUND CONFIG ===
+const SOUND_CONFIG = {
+  masterGain: 0.4,
+  shot: { baseFreq: 520, decay: 0.18 },
+  multiShotSpread: 0.06, // pitch variation factor per extra shot
+  explosion: { baseFreq: 90, decay: 0.6 },
+  planetExplosion: { baseFreq: 48, decay: 1.1 },
+  shipExplosion: { baseFreq: 140, decay: 0.7 },
+  alienSpawn: { baseFreq: 660, decay: 0.25 },
+  powerup: { decay: 0.25 },
+  levelUp: { freqs: [523, 659, 784], step: 0.12 },
+  gameOver: { freqs: [392, 233, 130], step: 0.25 },
+  waveforms: ['sine','triangle','sawtooth','square']
+};
 
 // === POWERUP TYPES ===
 const POWERUP_TYPES = {
@@ -103,6 +117,7 @@ let gameState = {
   // Spawn timing
   lastAlienSpawnFrame: 0
 };
+let soundManager; // global reference
 
 // === MAIN GAME FUNCTIONS ===
 
@@ -132,6 +147,8 @@ function drawStandardHealthBar(x, y, widthPx, heightPx, current, max) {
 function setup() {
   createCanvas(GAME_CONFIG.CANVAS_WIDTH, GAME_CONFIG.CANVAS_HEIGHT);
   angleMode(RADIANS);
+  // Initialize sound manager (lazy starts on first gesture)
+  soundManager = new SoundManager();
   
   // Initialize players with different positions and control schemes
   initializePlayers();
@@ -235,6 +252,7 @@ function updateAndDrawPlanets() {
   // Check for game over condition
   if (gameState.planets.length === 0 && !gameState.gameOver) {
     gameState.gameOver = true;
+  soundManager && soundManager.gameOver();
   }
 }
 
@@ -266,6 +284,7 @@ function checkPlayerAlienCollisions(player, playerIndex) {
         player.health -= GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
       }
       createExplosion(player.pos, player.color); // Use player's color for explosion
+  soundManager && soundManager.explosion('alien');
       
       // Chance to spawn powerup before removing alien
       if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
@@ -330,6 +349,10 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
     
     if (distance < GAME_CONFIG.PROJECTILE_HIT_RADIUS) {
       createExplosion(alien.pos, alien.color); // Use alien's color for explosion
+  soundManager && soundManager.explosion('alien');
+  soundManager && soundManager.explosion('alien');
+  soundManager && soundManager.explosion('alien');
+  soundManager && soundManager.explosion('planet');
       
       // Chance to spawn powerup before removing alien
       if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
@@ -436,6 +459,7 @@ function spawnAliens() {
     const spawnPosition = getRandomEdgePosition();
     const alienType = random(["dumb", "planet", "player"]);
     gameState.aliens.push(new Alien(spawnPosition.x, spawnPosition.y, alienType));
+  soundManager && soundManager.spawnAlien();
     gameState.lastAlienSpawnFrame = frameCount;
   }
 }
@@ -467,6 +491,7 @@ function checkLevelProgression() {
     
     // Visual feedback for level up
     createLevelUpEffect();
+  soundManager && soundManager.levelUp();
   }
 }
 
@@ -702,6 +727,7 @@ function findClosestTarget(pos, targets) {
  * Handle mouse click to toggle fullscreen mode
  */
 function mousePressed() {
+  soundManager && soundManager.init();
   if (!gameState.isFullscreen) {
     fullscreen(true);
     gameState.isFullscreen = true;
@@ -713,6 +739,7 @@ function mousePressed() {
  * Handle keyboard input for game controls
  */
 function keyPressed() {
+  soundManager && soundManager.init();
   // Restart game on 'R' key when game is over
   if (gameState.gameOver && (key === 'r' || key === 'R')) {
     restartGame();
@@ -760,6 +787,7 @@ function updateAndDrawPowerups() {
       const distance = dist(player.pos.x, player.pos.y, powerup.pos.x, powerup.pos.y);
       if (distance < GAME_CONFIG.POWERUP_COLLECTION_RADIUS) {
         applyPowerupToPlayer(player, powerup.type);
+  soundManager && soundManager.powerup(powerup.type);
         gameState.powerups.splice(i, 1);
         collected = true;
         break;
@@ -1020,6 +1048,7 @@ class Player {
       
       gameState.projectiles.push(projectile);
     }
+  soundManager && soundManager.shot(shots);
   }
 
   /**
@@ -1140,7 +1169,7 @@ class Projectile {
     this.penetrating = false;
     this.explosive = false;
     this.homing = false;
-    this.damage = 1.0;
+  this.damage = 1.0;
   }
 
   /**
@@ -1153,7 +1182,7 @@ class Projectile {
       let closestDistance = Infinity;
       
       for (let alien of gameState.aliens) {
-        const distance = p5.Vector.dist(this.pos, alien.pos);
+  const distance = p5.Vector.dist(this.pos, alien.pos);
         if (distance < closestDistance) {
           closestDistance = distance;
           closestAlien = alien;
@@ -1494,5 +1523,148 @@ class Powerup {
     
     pop();
   }
+}
+
+// === SOUND MANAGER ===
+class SoundManager {
+  constructor() {
+    this.initialized = false;
+    this.muted = false;
+    this.oscPool = [];
+    this.envPool = [];
+    this.noise = null;
+    this.poolIndex = 0;
+    this.warned = false;
+    this.poolSize = 8; // polyphony for overlapping bleeps
+  this.masterGain = SOUND_CONFIG.masterGain; // internal scaling (avoid masterVolume global)
+  }
+
+  init() {
+    if (this.initialized) return true;
+    if (typeof userStartAudio === 'function') userStartAudio(); // p5 helper (safe if already running)
+    if (typeof getAudioContext !== 'function') {
+      if (!this.warned) { console.warn('p5.sound not loaded; audio disabled'); this.warned = true; }
+      return false;
+    }
+    const ctx = getAudioContext();
+    if (!ctx) return false;
+    // Build oscillator + envelope pools
+    for (let i=0;i<this.poolSize;i++) {
+      const osc = new p5.Oscillator('sine');
+      const env = new p5.Envelope();
+      env.setADSR(0.001, 0.05, 0.0, 0.05); // fast attack/decay; sustain 0; short release
+      env.setRange(0.5, 0.0001);
+      osc.start();
+      osc.amp(0); // silence until envelope
+      this.oscPool.push(osc);
+      this.envPool.push(env);
+    }
+  this.noise = new p5.Noise('white');
+  this.noise.start();
+  this.noise.amp(0);
+  // Do not call masterVolume; some builds may not expose it. Scale per envelope instead.
+    this.initialized = true;
+    return true;
+  }
+
+  tone(freq, decay=0.15, type='sine', amp=0.5) {
+    if (!this.init() || this.muted) return;
+    const voiceIndex = this.poolIndex++ % this.oscPool.length;
+    const osc = this.oscPool[voiceIndex];
+    const env = this.envPool[voiceIndex];
+    osc.setType(type);
+    osc.freq(freq);
+    // shape envelope per call (reuse object)
+    env.setADSR(0.001, decay*0.6, 0.0, decay*0.4);
+  env.setRange(amp * this.masterGain, 0.0001);
+    env.play(osc, 0, 0);
+  }
+
+  shot(shots=1) {
+    if (!this.init() || this.muted) return;
+    const spread = SOUND_CONFIG.multiShotSpread;
+    for (let i=0;i<shots;i++) {
+      const ratio = shots>1 ? (i/(shots-1)-0.5) : 0;
+      const base = SOUND_CONFIG.shot.baseFreq * (1 + ratio*spread);
+      this.tone(base, SOUND_CONFIG.shot.decay*0.7, 'square', 0.35); // body
+      this.tone(base*0.55, SOUND_CONFIG.shot.decay*1.1, 'triangle', 0.22); // tail thump
+      this.pitchSweep(base*0.97, base*1.05, SOUND_CONFIG.shot.decay*0.45, 'sine', 0.16); // micro sweep
+    }
+  }
+
+  explosion(kind='alien') {
+    if (!this.init() || this.muted) return;
+    const isPlanet = kind==='planet';
+    const isShip = kind==='ship';
+    const cfg = isPlanet ? SOUND_CONFIG.planetExplosion : (isShip? SOUND_CONFIG.shipExplosion : SOUND_CONFIG.explosion);
+    const base = cfg.baseFreq;
+    const decay = cfg.decay;
+    this.pitchSweep(base*3, base*0.85, decay*0.55, 'sawtooth', 0.55); // bright impact
+    this.tone(base, decay*0.7, 'triangle', 0.5); // low body
+    if (this.noise) { // crackle tail
+      const nAmp = isPlanet?0.85:(isShip?0.65:0.6);
+      this.noise.amp(nAmp * this.masterGain, 0.002);
+      this.noise.amp(0.0001, decay);
+    }
+  }
+
+  pitchSweep(startFreq, endFreq, duration=0.2, type='sawtooth', amp=0.4) {
+    if (!this.init() || this.muted) return;
+    const voiceIndex = this.poolIndex++ % this.oscPool.length;
+    const osc = this.oscPool[voiceIndex];
+    const env = this.envPool[voiceIndex];
+    osc.setType(type);
+    osc.freq(startFreq);
+    env.setADSR(0.001, duration*0.7, 0.0, duration*0.3);
+    env.setRange(amp * this.masterGain, 0.0001);
+    env.play(osc, 0, 0);
+    const steps = 12;
+    for (let i=1;i<=steps;i++) {
+      const t = i/steps;
+      const f = lerp(startFreq, endFreq, t);
+      setTimeout(()=> osc.freq(f), t*duration*1000);
+    }
+  }
+
+  spawnAlien() {
+    if (!this.init() || this.muted) return;
+    const cfg = SOUND_CONFIG.alienSpawn;
+    this.pitchSweep(cfg.baseFreq*0.75, cfg.baseFreq, cfg.decay*0.5, 'square', 0.35);
+    setTimeout(()=> this.tone(cfg.baseFreq*1.15, cfg.decay*0.6, 'sine', 0.25), cfg.decay*400);
+  }
+
+  powerup(type) {
+    if (!this.init() || this.muted) return;
+    const idx = Object.keys(POWERUP_TYPES).indexOf(type);
+    const base = 600 + (idx % 6)*40;
+    this.tone(base, SOUND_CONFIG.powerup.decay, 'sine', 0.35);
+    this.tone(base*1.25, SOUND_CONFIG.powerup.decay*0.8, 'triangle', 0.25);
+  }
+
+  levelUp() {
+    if (!this.init() || this.muted) return;
+    SOUND_CONFIG.levelUp.freqs.forEach((f,i)=> {
+      setTimeout(()=> this.tone(f, 0.25, 'sine', 0.5), i * SOUND_CONFIG.levelUp.step*1000);
+    });
+  }
+
+  gameOver() {
+    if (!this.init() || this.muted) return;
+    SOUND_CONFIG.gameOver.freqs.forEach((f,i)=> {
+      setTimeout(()=> this.tone(f, 0.5, 'sawtooth', 0.4), i * SOUND_CONFIG.gameOver.step*1000);
+    });
+  }
+
+  toggleMute() { this.muted = !this.muted; }
+
+  setMasterGain(g) { this.masterGain = g; }
+
+  // Backward compatibility wrappers (old API names)
+  playShot(shots=1){ this.shot(shots); }
+  playExplosion(kind='alien'){ this.explosion(kind); }
+  playPowerup(type){ this.powerup(type); }
+  playLevelUp(){ this.levelUp(); }
+  playGameOver(){ this.gameOver(); }
+  playTone(freq, decay=0.2, type='sine', gain=0.5){ this.tone(freq, decay, type, gain); }
 }
 
