@@ -43,6 +43,11 @@ const GAME_CONFIG = {
   ALIEN_SIZE: 15,
   ALIEN_PLAYER_HIT_RADIUS: 20,
   ALIEN_SPEED_VARIANCE: 0.3, // New: Random speed variation factor
+  LARGE_ALIEN_CHANCE: 0.06, // chance per spawn attempt (applied after cap)
+  LARGE_ALIEN_SIZE: 32,
+  LARGE_ALIEN_BASE_SPEED: 0.35,
+  LARGE_ALIEN_HEALTH: 5,
+  LARGE_ALIEN_CONTACT_DAMAGE: 25,
   
   // Level progression settings
   ALIENS_PER_LEVEL: 10, // New: Aliens to kill to advance level
@@ -283,19 +288,28 @@ function checkPlayerAlienCollisions(player, playerIndex) {
       if (player.powerups.shield <= 0) {
         player.health -= GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
       }
-      createExplosion(player.pos, player.color); // Use player's color for explosion
-  soundManager && soundManager.explosion('alien');
+  createExplosion(player.pos, player.color); // Use player's color for explosion
+  soundManager && soundManager.explosion(player.isLarge ? 'ship' : 'ship');
       
       // Chance to spawn powerup before removing alien
       if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
         spawnPowerup(alien.pos.x, alien.pos.y);
       }
       
-      gameState.aliens.splice(j, 1);
+      if (alien.isLarge) {
+        alien.health -= 1;
+        if (alien.health <= 0) {
+          gameState.aliens.splice(j, 1);
+          gameState.aliensKilled++;
+          gameState.totalAliensKilled++;
+        }
+      } else {
+        gameState.aliens.splice(j, 1);
+        gameState.aliensKilled++;
+        gameState.totalAliensKilled++;
+      }
       
-      // Increment kill counters for level progression
-      gameState.aliensKilled++;
-      gameState.totalAliensKilled++;
+  // For large alien, kills counted only when removed
       
       // Debug log (temporary)
       console.log(`Alien hit player. Remaining aliens: ${gameState.aliens.length}`);
@@ -343,23 +357,36 @@ function updateAndDrawProjectiles() {
  * @returns {boolean} - True if projectile was destroyed
  */
 function checkProjectileAlienCollisions(projectile, projectileIndex) {
+  function removeAlienAndCount(idx) {
+    gameState.aliens.splice(idx, 1);
+    gameState.aliensKilled++;
+    gameState.totalAliensKilled++;
+  }
   for (let j = gameState.aliens.length - 1; j >= 0; j--) {
     const alien = gameState.aliens[j];
     const distance = dist(projectile.pos.x, projectile.pos.y, alien.pos.x, alien.pos.y);
     
     if (distance < GAME_CONFIG.PROJECTILE_HIT_RADIUS) {
       createExplosion(alien.pos, alien.color); // Use alien's color for explosion
-  soundManager && soundManager.explosion('alien');
-  soundManager && soundManager.explosion('alien');
-  soundManager && soundManager.explosion('alien');
-  soundManager && soundManager.explosion('planet');
+      if (alien.isLarge) {
+        soundManager && soundManager.explosion('planet'); // deeper boom for large
+      } else {
+        soundManager && soundManager.explosion('alien');
+      }
       
       // Chance to spawn powerup before removing alien
       if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
         spawnPowerup(alien.pos.x, alien.pos.y);
       }
       
-      gameState.aliens.splice(j, 1);
+      if (alien.isLarge) {
+        alien.health -= projectile.damage || 1;
+        if (alien.health <= 0) {
+          removeAlienAndCount(j);
+        }
+      } else {
+        removeAlienAndCount(j);
+      }
       
       // Handle explosive bullets
       if (projectile.explosive) {
@@ -371,9 +398,7 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
         gameState.projectiles.splice(projectileIndex, 1);
       }
       
-      // Increment kill counters
-      gameState.aliensKilled++;
-      gameState.totalAliensKilled++;
+  // Kill counters handled inside removeAlienAndCount for large alien
       // Debug log (temporary)
       console.log(`Projectile killed alien. Remaining aliens: ${gameState.aliens.length}`);
       
@@ -457,9 +482,31 @@ function spawnAliens() {
   if (frameCount - gameState.lastAlienSpawnFrame >= currentSpawnInterval && 
       gameState.aliens.length < maxAliens) {
     const spawnPosition = getRandomEdgePosition();
-    const alienType = random(["dumb", "planet", "player"]);
-    gameState.aliens.push(new Alien(spawnPosition.x, spawnPosition.y, alienType));
-  soundManager && soundManager.spawnAlien();
+    // Level-based weighting: cycle emphasis every 3 levels
+    const cycle = (gameState.level - 1) % 3; // 0,1,2
+    let weights;
+    if (cycle === 0) { // random emphasis
+      weights = { dumb: 0.55, planet: 0.25, player: 0.20 };
+    } else if (cycle === 1) { // planet seekers surge
+      weights = { dumb: 0.30, planet: 0.50, player: 0.20 };
+    } else { // player hunters surge
+      weights = { dumb: 0.30, planet: 0.20, player: 0.50 };
+    }
+    const r = random();
+    let alienType;
+    if (r < weights.dumb) alienType = 'dumb';
+    else if (r < weights.dumb + weights.planet) alienType = 'planet';
+    else alienType = 'player';
+    // Large alien rare spawn (independent roll, but only if population not too large)
+    if (random() < GAME_CONFIG.LARGE_ALIEN_CHANCE) {
+      alienType = 'large';
+    }
+    const alien = new Alien(spawnPosition.x, spawnPosition.y, alienType);
+    gameState.aliens.push(alien);
+    if (soundManager) {
+      if (alienType === 'large') soundManager.spawnAlien('large');
+      else soundManager.spawnAlien(alienType);
+    }
     gameState.lastAlienSpawnFrame = frameCount;
   }
 }
@@ -1299,15 +1346,18 @@ class Alien {
     this.pos = createVector(x, y);
     
     // Calculate speed with random variance and level scaling
-    const baseSpeed = GAME_CONFIG.ALIEN_BASE_SPEED;
+  const isLarge = type === 'large';
+  const baseSpeed = isLarge ? GAME_CONFIG.LARGE_ALIEN_BASE_SPEED : GAME_CONFIG.ALIEN_BASE_SPEED;
     const speedMultiplier = getCurrentSpeedMultiplier();
     const randomVariance = random(1 - GAME_CONFIG.ALIEN_SPEED_VARIANCE, 1 + GAME_CONFIG.ALIEN_SPEED_VARIANCE);
     const finalSpeed = baseSpeed * speedMultiplier * randomVariance;
     
     this.vel = p5.Vector.random2D().mult(finalSpeed);
     this.type = type;
-    this.sides = this.getSidesForType(type);
-    this.color = this.getColorForType(type);
+  this.sides = this.getSidesForType(type);
+  this.color = this.getColorForType(type);
+  this.isLarge = isLarge;
+  this.health = isLarge ? GAME_CONFIG.LARGE_ALIEN_HEALTH : 1;
     
     // Store individual speed for target seeking
     this.targetSpeed = GAME_CONFIG.ALIEN_TARGET_SPEED * speedMultiplier * randomVariance;
@@ -1326,6 +1376,7 @@ class Alien {
     switch (type) {
       case "planet": return 5;
       case "player": return 4;
+  case 'large': return 8;
       default: return 6; // "dumb" type
     }
   }
@@ -1339,6 +1390,7 @@ class Alien {
     switch (type) {
       case "planet": return color(0, 255, 100); // Green - seeks planets
       case "player": return color(255, 50, 50);  // Red - seeks players
+  case 'large': return color(255, 180, 0);    // Orange - large tank
       default: return color(150, 0, 255);        // Purple - random movement
     }
   }
@@ -1420,9 +1472,20 @@ class Alien {
     beginShape();
     for (let i = 0; i < this.sides; i++) {
       const angle = map(i, 0, this.sides, 0, TWO_PI);
-      vertex(cos(angle) * GAME_CONFIG.ALIEN_SIZE, sin(angle) * GAME_CONFIG.ALIEN_SIZE);
+      const radius = this.isLarge ? GAME_CONFIG.LARGE_ALIEN_SIZE : GAME_CONFIG.ALIEN_SIZE;
+      vertex(cos(angle) * radius, sin(angle) * radius);
     }
     endShape(CLOSE);
+    if (this.isLarge && this.health > 0) {
+      // simple small radial health pips
+      push();
+      noStroke();
+      fill(255,255,255,180);
+      textAlign(CENTER, CENTER);
+      textSize(12);
+      text(this.health, 0, 0);
+      pop();
+    }
     pop();
   }
 }
@@ -1586,9 +1649,14 @@ class SoundManager {
     for (let i=0;i<shots;i++) {
       const ratio = shots>1 ? (i/(shots-1)-0.5) : 0;
       const base = SOUND_CONFIG.shot.baseFreq * (1 + ratio*spread);
-      this.tone(base, SOUND_CONFIG.shot.decay*0.7, 'square', 0.35); // body
-      this.tone(base*0.55, SOUND_CONFIG.shot.decay*1.1, 'triangle', 0.22); // tail thump
-      this.pitchSweep(base*0.97, base*1.05, SOUND_CONFIG.shot.decay*0.45, 'sine', 0.16); // micro sweep
+  // Quick click (very short high freq sweep)
+  this.pitchSweep(base*1.8, base*1.2, SOUND_CONFIG.shot.decay*0.25, 'sine', 0.20);
+  // Core crack (square)
+  this.tone(base*0.95, SOUND_CONFIG.shot.decay*0.55, 'square', 0.38);
+  // Low tail
+  this.tone(base*0.5, SOUND_CONFIG.shot.decay*0.9, 'triangle', 0.18);
+  // Optional very subtle upward whisper
+  this.pitchSweep(base*0.9, base*1.02, SOUND_CONFIG.shot.decay*0.4, 'triangle', 0.10);
     }
   }
 
