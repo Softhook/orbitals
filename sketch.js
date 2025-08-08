@@ -37,7 +37,7 @@ const GAME_CONFIG = {
   PLANET_MARGIN: 200, // Margin from screen edges where planets can be placed
   
   // Alien settings
-  ALIEN_SPAWN_INTERVAL: 120, // frames
+  ALIEN_SPAWN_INTERVAL: 100, // frames
   ALIEN_BASE_SPEED: 0.5,
   ALIEN_TARGET_SPEED: 0.3,
   ALIEN_SIZE: 15,
@@ -73,7 +73,24 @@ const GAME_CONFIG = {
   POWERUP_PULSE_SPEED: 0.1 // Speed of size pulsing animation
 };
 // Per-type soft caps to avoid runaway counts
-const ALIEN_TYPE_MAX = { vortex:2, splitter:4, blink:5, large:2, mini:8 };
+const ALIEN_TYPE_MAX = { vortex:2, splitter:4, blink:5, large:2, mini:8, boss:1 };
+// Boss spawn tuning
+const BOSS_CONFIG = {
+  CHANCE_PER_SPAWN: 0.005, // 0.5% per spawn attempt (after caps) when level high enough
+  MIN_LEVEL: 5,
+  HEALTH: 50,
+  SIZE: 60,
+  CONTACT_DAMAGE: 60,
+  SPLIT_SPAWN_INTERVAL: 240, // frames between automatic splitter spawns (~4s at 60fps)
+  SPLITTER_BURST_ON_HIT: 0.15, // chance to emit a splitter on each damaging hit
+  DEATH_SPLITTERS: 6 // burst of splitters on death (capped by room)
+};
+
+// Ensure consistent base rendering state each frame (avoid stroke leakage)
+function resetDrawState(){
+  stroke(255);
+  strokeWeight(1);
+}
 
 // === ALIEN TYPE REGISTRY (modular behaviors) ===
 const AlienTypeRegistry = {
@@ -209,8 +226,10 @@ function behaviorLeech(alien, gameState) {
   // Drain only every 5 frames for balance; small amount per tick (~0.0033/sec * 12 = 0.04/sec at 60fps)
   if (frameCount % 5 !== 0) return;
   for (const p of gameState.planets) {
-    const d = p5.Vector.dist(alien.pos, p.pos);
-    if (d < GAME_CONFIG.PLANET_SIZE * 1.15) {
+  const dx = alien.pos.x - p.pos.x;
+  const dy = alien.pos.y - p.pos.y;
+  const r = GAME_CONFIG.PLANET_SIZE * 1.15;
+  if (dx*dx + dy*dy < r*r) {
       p.health -= 0.04; // tuned leech rate (was continuous 0.6/sec); now 0.48/sec when in contact
     }
   }
@@ -250,6 +269,31 @@ function behaviorVortex(alien, gameState) {
       proj.vel.y += -dy*inv*0.05;
       proj.vel.limit(GAME_CONFIG.PROJECTILE_SPEED*1.2);
     }
+  }
+}
+function behaviorBoss(alien, gameState) {
+  // Aggressively seek players else planets
+  if (gameState.players.length > 0) behaviorSeekPlayers(alien, gameState); else behaviorSeekPlanets(alien, gameState);
+  // Periodic splitter spawn
+  alien._splitTimer = (alien._splitTimer||0)+1;
+  if (alien._splitTimer >= BOSS_CONFIG.SPLIT_SPAWN_INTERVAL) {
+    alien._splitTimer = 0;
+    spawnBossSplitters(alien, 3); // periodic small wave
+  }
+}
+
+function spawnBossSplitters(bossAlien, count) {
+  const room = getCurrentMaxAliens() - gameState.aliens.length;
+  if (room <= 0) return;
+  const currentSplitters = gameState.aliens.reduce((c,a)=> c + (a.type==='splitter'),0);
+  const splitterCapRoom = (ALIEN_TYPE_MAX.splitter||Infinity) - currentSplitters;
+  if (splitterCapRoom <= 0) return;
+  const spawnCount = min(count, room, splitterCapRoom);
+  for (let i=0;i<spawnCount;i++) {
+    const offset = p5.Vector.random2D().mult(random(20, bossAlien.size*0.9));
+    const a = new Alien(bossAlien.pos.x + offset.x, bossAlien.pos.y + offset.y, 'splitter');
+    gameState.aliens.push(a);
+    soundManager && soundManager.spawnAlien('splitter');
   }
 }
 
@@ -317,6 +361,14 @@ AlienTypeRegistry.register('vortex', {
   sides: 9, color:[180,0,255], baseSpeed:0.35, targetSpeed:0.35, health:2, size: GAME_CONFIG.ALIEN_SIZE+6,
   contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorVortex,
   spawnWeight:(lvl,cycle)=> lvl>4?0.06:0.0, spawnSound:'alien'
+});
+AlienTypeRegistry.register('boss', {
+  sides: 12, color:[255,40,40], baseSpeed:0.30, targetSpeed:0.32, health:BOSS_CONFIG.HEALTH, size:BOSS_CONFIG.SIZE,
+  contactDamage: BOSS_CONFIG.CONTACT_DAMAGE, behavior: behaviorBoss,
+  spawnWeight:()=>0, spawnSound:'boss',
+  onDeath:(alien)=>{ // large burst of splitters
+    spawnBossSplitters(alien, BOSS_CONFIG.DEATH_SPLITTERS);
+  }
 });
 // === SOUND CONFIG ===
 const SOUND_CONFIG = {
@@ -463,6 +515,7 @@ function repositionPlanets() {
  */
 function draw() {
   background(GAME_CONFIG.BACKGROUND_COLOR);
+  resetDrawState();
   
   if (gameState.gameOver) {
     displayGameOver();
@@ -644,7 +697,12 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
       // Apply damage / special logic
       const cfg = AlienTypeRegistry.get(alien.type);
   // shield already handled
+      const preHealth = alien.health;
       alien.health -= (projectile.damage || 1);
+      if (alien.type==='boss' && alien.health>0 && alien.health < preHealth) {
+        // chance to spawn a reactive splitter on hit
+        if (random() < BOSS_CONFIG.SPLITTER_BURST_ON_HIT) spawnBossSplitters(alien,1);
+      }
       if (alien.health <= 0) {
         // Death effects
         if (cfg && typeof cfg.onDeath === 'function') cfg.onDeath(alien);
@@ -699,9 +757,10 @@ function updateAndDrawAliens() {
 function checkAlienPlanetCollisions(alien, alienIndex) {
   for (let j = gameState.planets.length - 1; j >= 0; j--) {
     const planet = gameState.planets[j];
-    const distance = dist(alien.pos.x, alien.pos.y, planet.pos.x, planet.pos.y);
-    
-    if (distance < GAME_CONFIG.PLANET_HIT_RADIUS) {
+  const dx = alien.pos.x - planet.pos.x;
+  const dy = alien.pos.y - planet.pos.y;
+  const r = GAME_CONFIG.PLANET_HIT_RADIUS;
+  if (dx*dx + dy*dy < r*r) {
       planet.health -= 1;
       createExplosion(alien.pos, alien.color); // Use alien's color for explosion
       
@@ -743,7 +802,13 @@ function spawnAliens() {
     const spawnPosition = getRandomEdgePosition();
     // Determine alien type via registry weighting
   let alienType = AlienTypeRegistry.pick(gameState.level);
-  if (random() < GAME_CONFIG.LARGE_ALIEN_CHANCE) alienType = 'large';
+  // Boss roll (only if conditions and none exists yet)
+  const bossExists = gameState.aliens.some(a=>a.type==='boss');
+  if (!bossExists && gameState.level >= BOSS_CONFIG.MIN_LEVEL && random() < BOSS_CONFIG.CHANCE_PER_SPAWN) {
+    alienType = 'boss';
+  } else if (random() < GAME_CONFIG.LARGE_ALIEN_CHANCE) {
+    alienType = 'large';
+  }
   const countOfType = gameState.aliens.reduce((c,a)=>c+(a.type===alienType),0);
   if (ALIEN_TYPE_MAX[alienType] && countOfType >= ALIEN_TYPE_MAX[alienType]) alienType = 'dumb';
   const alien = new Alien(spawnPosition.x, spawnPosition.y, alienType);
@@ -804,6 +869,7 @@ function createLevelUpEffect() {
  */
 function displayGameUI() {
   push();
+  noStroke();
   fill(255);
   textSize(16);
   textAlign(LEFT);
@@ -839,6 +905,7 @@ function displayGameUI() {
  */
 function displayGameOver() {
   push();
+  noStroke();
   
   // Semi-transparent overlay
   fill(0, 0, 0, 150);
@@ -910,21 +977,18 @@ function getCurrentSpeedMultiplier() {
  * Handle particle updates and rendering with performance limits
  */
 function updateAndDrawParticles() {
-  // Limit particle count for performance
   if (gameState.thrustParticles.length > GAME_CONFIG.MAX_PARTICLES) {
     gameState.thrustParticles = gameState.thrustParticles.slice(-GAME_CONFIG.MAX_PARTICLES);
   }
-  
+  push();
+  noStroke();
   for (let i = gameState.thrustParticles.length - 1; i >= 0; i--) {
     const particle = gameState.thrustParticles[i];
     particle.update();
     particle.display();
-    
-    // Remove expired particles
-    if (particle.lifespan <= 0) {
-      gameState.thrustParticles.splice(i, 1);
-    }
+    if (particle.lifespan <= 0) gameState.thrustParticles.splice(i, 1);
   }
+  pop();
 }
 
 // === UTILITY FUNCTIONS ===
@@ -999,12 +1063,16 @@ function applyPlanetaryGravity(pos, vel) {
  */
 function findClosestTarget(pos, targets) {
   if (targets.length === 0) return null;
-  
-  return targets.reduce((closest, current) => {
-    const closestDist = p5.Vector.dist(pos, closest.pos);
-    const currentDist = p5.Vector.dist(pos, current.pos);
-    return currentDist < closestDist ? current : closest;
-  });
+  let best = targets[0];
+  let bestD2 = (pos.x - best.pos.x)*(pos.x - best.pos.x) + (pos.y - best.pos.y)*(pos.y - best.pos.y);
+  for (let i=1;i<targets.length;i++) {
+    const t = targets[i];
+    const dx = pos.x - t.pos.x;
+    const dy = pos.y - t.pos.y;
+    const d2 = dx*dx + dy*dy;
+    if (d2 < bestD2) { best = t; bestD2 = d2; }
+  }
+  return best;
 }
 
 // === INPUT HANDLERS ===
@@ -1070,8 +1138,10 @@ function updateAndDrawPowerups() {
     
     // Check for collection by players
     for (let player of gameState.players) {
-      const distance = dist(player.pos.x, player.pos.y, powerup.pos.x, powerup.pos.y);
-      if (distance < GAME_CONFIG.POWERUP_COLLECTION_RADIUS) {
+      const dx = player.pos.x - powerup.pos.x;
+      const dy = player.pos.y - powerup.pos.y;
+      const r = GAME_CONFIG.POWERUP_COLLECTION_RADIUS;
+      if (dx*dx + dy*dy < r*r) {
         applyPowerupToPlayer(player, powerup.type);
   soundManager && soundManager.powerup(powerup.type);
         gameState.powerups.splice(i, 1);
@@ -1158,9 +1228,9 @@ function applyPowerupToPlayer(player, type) {
 function createExplosiveDamage(center, radius) {
   for (let i = gameState.aliens.length - 1; i >= 0; i--) {
     const alien = gameState.aliens[i];
-    const distance = p5.Vector.dist(center, alien.pos);
-    
-    if (distance < radius) {
+  const dx = center.x - alien.pos.x;
+  const dy = center.y - alien.pos.y;
+  if (dx*dx + dy*dy < radius*radius) {
       createExplosion(alien.pos, alien.color);
       
       // Chance to spawn powerup
@@ -1466,17 +1536,15 @@ class Projectile {
   update() {
     // Homing behavior - seek nearest alien
     if (this.homing && gameState.aliens.length > 0) {
-      let closestAlien = null;
-      let closestDistance = Infinity;
-      
-      for (let alien of gameState.aliens) {
-  const distance = p5.Vector.dist(this.pos, alien.pos);
-        if (distance < closestDistance) {
-          closestDistance = distance;
-          closestAlien = alien;
-        }
+      let closestAlien = gameState.aliens[0];
+      let bestD2 = (this.pos.x - closestAlien.pos.x)*(this.pos.x - closestAlien.pos.x) + (this.pos.y - closestAlien.pos.y)*(this.pos.y - closestAlien.pos.y);
+      for (let k=1;k<gameState.aliens.length;k++) {
+        const a = gameState.aliens[k];
+        const dx = this.pos.x - a.pos.x;
+        const dy = this.pos.y - a.pos.y;
+        const d2 = dx*dx + dy*dy;
+        if (d2 < bestD2) { bestD2 = d2; closestAlien = a; }
       }
-      
       if (closestAlien) {
         const steer = p5.Vector.sub(closestAlien.pos, this.pos);
         steer.normalize();
@@ -1507,8 +1575,7 @@ class Projectile {
    * Render the projectile with powerup effects
    */
   display() {
-    push();
-    
+  push();
     // Different colors based on powerup effects
     if (this.explosive) {
       fill(255, 100, 0); // Orange for explosive
@@ -1520,7 +1587,7 @@ class Projectile {
       fill(255, 200, 0); // Default yellow
     }
     
-    noStroke();
+  noStroke();
     ellipse(this.pos.x, this.pos.y, this.size);
     
     // Add glow effect for special bullets
@@ -1559,9 +1626,12 @@ class Planet {
    * Draw the planet as a blue circle
    */
   drawPlanet() {
-    fill(100, 150, 255);
-    stroke(255);
-    ellipse(this.pos.x, this.pos.y, GAME_CONFIG.PLANET_SIZE);
+  push();
+  stroke(255);
+  strokeWeight(1);
+  fill(100, 150, 255);
+  ellipse(this.pos.x, this.pos.y, GAME_CONFIG.PLANET_SIZE);
+  pop();
   }
 
   /**
@@ -1740,8 +1810,7 @@ class ThrustParticle {
    * Render the particle with fading alpha and custom color
    */
   display() {
-    noStroke();
-    // Extract RGB values and apply alpha based on lifespan
+  // Extract RGB values and apply alpha based on lifespan (stroke disabled in batch caller)
     const r = red(this.color);
     const g = green(this.color);
     const b = blue(this.color);
@@ -1924,6 +1993,10 @@ class SoundManager {
     const cfg = SOUND_CONFIG.alienSpawn;
     // Differentiate by type: adjust waveform, direction, layering
     switch (type) {
+      case 'boss':
+        this.pitchSweep(cfg.baseFreq*0.4, cfg.baseFreq*0.75, cfg.decay*1.6, 'sawtooth', 0.6);
+        setTimeout(()=> this.tone(cfg.baseFreq*0.5, cfg.decay*1.2, 'triangle', 0.4), cfg.decay*500);
+        break;
       case 'large':
         this.pitchSweep(cfg.baseFreq*0.55, cfg.baseFreq*0.8, cfg.decay*0.9, 'sawtooth', 0.45);
         this.tone(cfg.baseFreq*0.5, cfg.decay*0.8, 'triangle', 0.25);
