@@ -997,7 +997,7 @@ class Player {
     
     // Handle multi-shot powerups
     const shots = this.powerups.multiShot;
-    const spreadAngle = shots > 1 ? PI / 6 : 0; // 30 degree spread for multi-shot
+    const spreadAngle = shots > 1 ? PI / 12 : 0; // 15 degree spread for multi-shot (tighter)
     
     for (let i = 0; i < shots; i++) {
       let shootAngle = this.angle;
