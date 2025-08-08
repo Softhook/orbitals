@@ -73,7 +73,7 @@ const GAME_CONFIG = {
   POWERUP_PULSE_SPEED: 0.1 // Speed of size pulsing animation
 };
 // Per-type soft caps to avoid runaway counts
-const ALIEN_TYPE_MAX = { vortex:2, splitter:4, blink:5, large:2 };
+const ALIEN_TYPE_MAX = { vortex:2, splitter:4, blink:5, large:2, mini:8 };
 
 // === ALIEN TYPE REGISTRY (modular behaviors) ===
 const AlienTypeRegistry = {
@@ -206,10 +206,12 @@ function behaviorOrbiter(alien, gameState) {
 function behaviorLeech(alien, gameState) {
   behaviorSeekPlanets(alien, gameState);
   if (gameState.planets.length===0) return;
+  // Drain only every 5 frames for balance; small amount per tick (~0.0033/sec * 12 = 0.04/sec at 60fps)
+  if (frameCount % 5 !== 0) return;
   for (const p of gameState.planets) {
     const d = p5.Vector.dist(alien.pos, p.pos);
-    if (d < GAME_CONFIG.PLANET_SIZE * 1.2) {
-      p.health -= 0.01; // slow siphon
+    if (d < GAME_CONFIG.PLANET_SIZE * 1.15) {
+      p.health -= 0.04; // tuned leech rate (was continuous 0.6/sec); now 0.48/sec when in contact
     }
   }
 }
@@ -261,9 +263,13 @@ AlienTypeRegistry.register('splitter', {
   sides: 6, color:[255,120,0], baseSpeed:0.5, targetSpeed:0.4, health:2, size: GAME_CONFIG.ALIEN_SIZE+4,
   contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorSplitter,
   onDeath:(alien)=>{ // spawn minis bounded
-    const room = getCurrentMaxAliens() - gameState.aliens.length;
-    if (room <= 0) return;
-    const spawnCount = min(2, room);
+  const room = getCurrentMaxAliens() - gameState.aliens.length;
+  if (room <= 0) return;
+  // Respect mini type cap as well
+  const currentMinis = gameState.aliens.reduce((c,a)=> c + (a.type==='mini'), 0);
+  const miniCapRoom = (ALIEN_TYPE_MAX.mini||Infinity) - currentMinis;
+  if (miniCapRoom <= 0) return;
+  const spawnCount = min(2, room, miniCapRoom);
     for (let k=0;k<spawnCount;k++) {
       const a = new Alien(alien.pos.x + random(-10,10), alien.pos.y + random(-10,10), 'mini');
       gameState.aliens.push(a);
@@ -466,6 +472,13 @@ function draw() {
   // Process all game entities in order
   updateAndDrawPlanets();
   updateAndDrawPlayers();
+  // Check for all players destroyed (new loss condition)
+  if (!gameState.gameOver && gameState.players.length === 0) {
+    gameState.gameOver = true;
+    soundManager && soundManager.gameOver();
+    displayGameOver();
+    return;
+  }
   updateAndDrawProjectiles();
   updateAndDrawAliens();
   updateAndDrawPowerups();
@@ -477,6 +490,7 @@ function draw() {
   
   // Display game UI
   displayGameUI();
+  soundManager && soundManager.update();
 }
 
 /**
@@ -531,8 +545,14 @@ function checkPlayerAlienCollisions(player, playerIndex) {
       const cfg = AlienTypeRegistry.get(alien.type);
       if (alien.type === 'shielded') {
         alien.invulnFrames = alien.invulnFrames||0;
-        if (alien.invulnFrames>0) continue; else alien.invulnFrames=15;
+        if (alien.invulnFrames>0) {
+          // Ignore hit entirely (shield active) – no FX
+          continue;
+        } else {
+          alien.invulnFrames = 15; // begin invulnerability window AFTER this registered hit
+        }
       }
+      // Apply damage & FX
       alien.health -= 1;
       if (alien.health <= 0) {
         if (cfg && cfg.onDeath) cfg.onDeath(alien);
@@ -541,9 +561,12 @@ function checkPlayerAlienCollisions(player, playerIndex) {
         gameState.totalAliensKilled++;
         if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) spawnPowerup(alien.pos.x, alien.pos.y);
         soundManager && soundManager.explosion(alien.isLarge?'planet':'alien');
+        createExplosion(player.pos, player.color);
+        soundManager && soundManager.explosion('ship');
+      } else {
+        createExplosion(player.pos, player.color);
+        soundManager && soundManager.explosion('ship');
       }
-      createExplosion(player.pos, player.color);
-      soundManager && soundManager.explosion('ship');
       if (player.health <= 0) { gameState.players.splice(playerIndex,1); break; }
     }
   }
@@ -596,10 +619,20 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
     const projectileRadius = (projectile.size || GAME_CONFIG.PROJECTILE_SIZE)*0.5;
     const hitR = alienRadius + projectileRadius;
     if (dx*dx + dy*dy < hitR*hitR) {
-      if (alien.type === 'shielded') { // pre FX shield gate
+      if (alien.type === 'shielded') { // shield gating
         alien.invulnFrames = alien.invulnFrames||0;
-        if (alien.invulnFrames>0) continue; else alien.invulnFrames=15;
+        if (alien.invulnFrames>0) {
+          // Shield active – ignore totally
+          if (!projectile.penetrating) {
+            gameState.projectiles.splice(projectileIndex,1);
+            return true;
+          }
+          continue;
+        } else {
+          alien.invulnFrames = 15; // start invuln AFTER this hit processes
+        }
       }
+      // FX only if not shield-blocked
       createExplosion(alien.pos, alien.color); // Use alien's color for explosion
       soundManager && soundManager.explosion(alien.isLarge?'planet':'alien');
       
@@ -629,9 +662,6 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
       }
       
   // Kill counters handled inside removeAlienAndCount
-      // Debug log (temporary)
-      console.log(`Projectile killed alien. Remaining aliens: ${gameState.aliens.length}`);
-      
       return !projectile.penetrating; // Return true if projectile was destroyed
     }
   }
@@ -654,7 +684,7 @@ function updateAndDrawAliens() {
     if (isOffScreenWithBuffer(alien.pos)) {
       gameState.aliens.splice(i, 1);
       // Debug log (temporary)
-      if (frameCount % 60 === 0) console.log(`Removed off-screen alien. Remaining: ${gameState.aliens.length}`);
+  // debug log removed for performance
       continue;
     }
     
@@ -686,8 +716,7 @@ function checkAlienPlanetCollisions(alien, alienIndex) {
       gameState.aliensKilled++;
       gameState.totalAliensKilled++;
       
-      // Debug log (temporary)
-      console.log(`Alien hit planet. Remaining aliens: ${gameState.aliens.length}`);
+  // debug log removed
       break;
     }
   }
@@ -820,11 +849,6 @@ function displayGameOver() {
   textAlign(CENTER, CENTER);
   textSize(64);
   text("GAME OVER", width / 2, height / 2 - 60);
-  
-  // Subtitle
-  fill(255);
-  textSize(24);
-  text("All planets have been destroyed!", width / 2, height / 2 - 10);
   
   // Final stats
   textSize(18);
@@ -1143,10 +1167,12 @@ function createExplosiveDamage(center, radius) {
       if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
         spawnPowerup(alien.pos.x, alien.pos.y);
       }
-      
-      gameState.aliens.splice(i, 1);
-      gameState.aliensKilled++;
-      gameState.totalAliensKilled++;
+  // Invoke type onDeath hook so splitter / others behave correctly
+  const cfg = AlienTypeRegistry.get(alien.type);
+  if (cfg && typeof cfg.onDeath === 'function') cfg.onDeath(alien);
+  gameState.aliens.splice(i, 1);
+  gameState.aliensKilled++;
+  gameState.totalAliensKilled++;
     }
   }
 }
@@ -1662,14 +1688,23 @@ class Alien {
       vertex(cos(angle) * radius, sin(angle) * radius);
     }
     endShape(CLOSE);
-    if (this.isLarge && this.health > 0) {
-      // simple small radial health pips
+    if (this.health > 1) { // Generic multi-hit indicator
       push();
       noStroke();
-      fill(255,255,255,180);
+      fill(255,255,255,200);
       textAlign(CENTER, CENTER);
       textSize(12);
       text(this.health, 0, 0);
+      pop();
+    }
+    // Shield visual (blink effect) when invulnerable
+    if (this.type === 'shielded' && this.invulnFrames && this.invulnFrames>0) {
+      push();
+      noFill();
+      const alpha = map(this.invulnFrames, 0, 15, 30, 180);
+      stroke(120,200,255, alpha);
+      strokeWeight(2);
+      ellipse(0,0,this.size*2.4, this.size*2.4);
       pop();
     }
     pop();
@@ -1786,6 +1821,8 @@ class SoundManager {
     this.warned = false;
     this.poolSize = 8; // polyphony for overlapping bleeps
   this.masterGain = SOUND_CONFIG.masterGain; // internal scaling (avoid masterVolume global)
+  this.activeSweeps = [];
+  this.lastExplosionTimes = []; // for rate limiting
   }
 
   init() {
@@ -1848,13 +1885,20 @@ class SoundManager {
 
   explosion(kind='alien') {
     if (!this.init() || this.muted) return;
+  // Rate limit explosion layering: keep timestamps (ms) and trim
+  const now = millis();
+  this.lastExplosionTimes.push(now);
+  while (this.lastExplosionTimes.length && now - this.lastExplosionTimes[0] > 300) this.lastExplosionTimes.shift();
+  const density = this.lastExplosionTimes.length; // explosions in last 300ms
     const isPlanet = kind==='planet';
     const isShip = kind==='ship';
     const cfg = isPlanet ? SOUND_CONFIG.planetExplosion : (isShip? SOUND_CONFIG.shipExplosion : SOUND_CONFIG.explosion);
     const base = cfg.baseFreq;
     const decay = cfg.decay;
-    this.pitchSweep(base*3, base*0.85, decay*0.55, 'sawtooth', 0.55); // bright impact
-    this.tone(base, decay*0.7, 'triangle', 0.5); // low body
+  const impactAmp = density>6 ? 0.3 : 0.55;
+  const bodyAmp = density>6 ? 0.3 : 0.5;
+  this.pitchSweep(base*3, base*0.85, decay*0.55, 'sawtooth', impactAmp); // bright impact
+  this.tone(base, decay*0.7, 'triangle', bodyAmp); // low body
     if (this.noise) { // crackle tail
       const nAmp = isPlanet?0.85:(isShip?0.65:0.6);
       this.noise.amp(nAmp * this.masterGain, 0.002);
@@ -1864,27 +1908,61 @@ class SoundManager {
 
   pitchSweep(startFreq, endFreq, duration=0.2, type='sawtooth', amp=0.4) {
     if (!this.init() || this.muted) return;
-    const voiceIndex = this.poolIndex++ % this.oscPool.length;
-    const osc = this.oscPool[voiceIndex];
-    const env = this.envPool[voiceIndex];
+    const idx = this.poolIndex++ % this.oscPool.length;
+    const osc = this.oscPool[idx];
+    const env = this.envPool[idx];
     osc.setType(type);
     osc.freq(startFreq);
     env.setADSR(0.001, duration*0.7, 0.0, duration*0.3);
     env.setRange(amp * this.masterGain, 0.0001);
     env.play(osc, 0, 0);
-    const steps = 12;
-    for (let i=1;i<=steps;i++) {
-      const t = i/steps;
-      const f = lerp(startFreq, endFreq, t);
-      setTimeout(()=> osc.freq(f), t*duration*1000);
-    }
+    this.activeSweeps.push({ osc, startFreq, endFreq, startTime: millis(), duration: duration*1000 });
   }
 
-  spawnAlien() {
+  spawnAlien(type='alien') {
     if (!this.init() || this.muted) return;
     const cfg = SOUND_CONFIG.alienSpawn;
-    this.pitchSweep(cfg.baseFreq*0.75, cfg.baseFreq, cfg.decay*0.5, 'square', 0.35);
-    setTimeout(()=> this.tone(cfg.baseFreq*1.15, cfg.decay*0.6, 'sine', 0.25), cfg.decay*400);
+    // Differentiate by type: adjust waveform, direction, layering
+    switch (type) {
+      case 'large':
+        this.pitchSweep(cfg.baseFreq*0.55, cfg.baseFreq*0.8, cfg.decay*0.9, 'sawtooth', 0.45);
+        this.tone(cfg.baseFreq*0.5, cfg.decay*0.8, 'triangle', 0.25);
+        break;
+      case 'mini':
+        this.pitchSweep(cfg.baseFreq*1.2, cfg.baseFreq*1.45, cfg.decay*0.35, 'square', 0.25);
+        this.tone(cfg.baseFreq*1.6, cfg.decay*0.3, 'sine', 0.15);
+        break;
+      case 'vortex':
+        this.pitchSweep(cfg.baseFreq*0.9, cfg.baseFreq*0.6, cfg.decay*1.2, 'triangle', 0.4);
+        setTimeout(()=> this.pitchSweep(cfg.baseFreq*0.6, cfg.baseFreq*0.4, cfg.decay*0.8, 'sine', 0.25), cfg.decay*300);
+        break;
+      case 'shielded':
+        this.pitchSweep(cfg.baseFreq*0.8, cfg.baseFreq, cfg.decay*0.5, 'square', 0.3);
+        this.tone(cfg.baseFreq*1.05, cfg.decay*0.5, 'sine', 0.18);
+        break;
+      case 'splitter':
+        this.pitchSweep(cfg.baseFreq*0.95, cfg.baseFreq*1.15, cfg.decay*0.4, 'square', 0.3);
+        break;
+      case 'bomber':
+        this.pitchSweep(cfg.baseFreq*0.7, cfg.baseFreq*0.95, cfg.decay*0.65, 'sawtooth', 0.35);
+        break;
+      case 'orbiter':
+        this.pitchSweep(cfg.baseFreq*1.0, cfg.baseFreq*1.2, cfg.decay*0.5, 'triangle', 0.3);
+        break;
+      case 'leech':
+        this.pitchSweep(cfg.baseFreq*0.85, cfg.baseFreq*1.05, cfg.decay*0.55, 'sine', 0.28);
+        break;
+      case 'evasive':
+        this.pitchSweep(cfg.baseFreq*1.05, cfg.baseFreq*1.25, cfg.decay*0.35, 'square', 0.3);
+        break;
+      case 'blink':
+        this.pitchSweep(cfg.baseFreq*1.15, cfg.baseFreq*0.95, cfg.decay*0.45, 'triangle', 0.32);
+        setTimeout(()=> this.tone(cfg.baseFreq*1.4, cfg.decay*0.4, 'sine', 0.2), cfg.decay*350);
+        break;
+      default:
+        this.pitchSweep(cfg.baseFreq*0.75, cfg.baseFreq, cfg.decay*0.5, 'square', 0.35);
+        setTimeout(()=> this.tone(cfg.baseFreq*1.15, cfg.decay*0.6, 'sine', 0.25), cfg.decay*400);
+    }
   }
 
   powerup(type) {
@@ -1910,6 +1988,17 @@ class SoundManager {
   }
 
   toggleMute() { this.muted = !this.muted; }
+  update() {
+    if (!this.initialized || this.activeSweeps.length===0) return;
+    const now = millis();
+    for (let i=this.activeSweeps.length-1;i>=0;i--) {
+      const s = this.activeSweeps[i];
+      const t = (now - s.startTime)/s.duration;
+      if (t >= 1) { s.osc.freq(s.endFreq); this.activeSweeps.splice(i,1); continue; }
+      const f = lerp(s.startFreq, s.endFreq, t);
+      s.osc.freq(f);
+    }
+  }
 
   setMasterGain(g) { this.masterGain = g; }
 
