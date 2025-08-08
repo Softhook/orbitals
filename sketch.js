@@ -72,6 +72,103 @@ const GAME_CONFIG = {
   POWERUP_COLLECTION_RADIUS: 25,
   POWERUP_PULSE_SPEED: 0.1 // Speed of size pulsing animation
 };
+
+// === ALIEN TYPE REGISTRY (modular behaviors) ===
+const AlienTypeRegistry = {
+  types: {},
+  register(name, cfg) { this.types[name] = cfg; },
+  get(name) { return this.types[name]; },
+  list() { return Object.keys(this.types); },
+  pick(level) {
+    // Cycle emphasis every 3 levels: 0 random heavy, 1 planet heavy, 2 player heavy
+    const cycle = (level - 1) % 3;
+    const weights = [];
+    let total = 0;
+    for (const [name, cfg] of Object.entries(this.types)) {
+      if (name === 'large') continue; // large handled separately
+      const w = (cfg.spawnWeight ? cfg.spawnWeight(level, cycle) : 1);
+      if (w > 0) { weights.push({ name, w }); total += w; }
+    }
+    if (weights.length === 0) return 'dumb';
+    let r = random(total);
+    for (const entry of weights) { r -= entry.w; if (r <= 0) return entry.name; }
+    return weights[weights.length-1].name;
+  }
+};
+
+// Base behaviors
+function behaviorDumb(/*alien, gameState*/) { /* no-op random drift */ }
+function behaviorSeekPlanets(alien, gameState) {
+  if (gameState.planets.length === 0) return;
+  const target = findClosestTarget(alien.pos, gameState.planets);
+  if (target) {
+    const direction = p5.Vector.sub(target.pos, alien.pos).setMag(alien.targetSpeed);
+    alien.vel = direction;
+  }
+}
+function behaviorSeekPlayers(alien, gameState) {
+  if (gameState.players.length === 0) return;
+  const target = findClosestTarget(alien.pos, gameState.players);
+  if (target) {
+    const direction = p5.Vector.sub(target.pos, alien.pos).setMag(alien.targetSpeed);
+    alien.vel = direction;
+  }
+}
+function behaviorLarge(alien, gameState) { // hybrid: prefers players else planets
+  if (gameState.players.length > 0) behaviorSeekPlayers(alien, gameState);
+  else if (gameState.planets.length > 0) behaviorSeekPlanets(alien, gameState);
+  // slight inertia drift retained
+}
+
+// Register default types
+AlienTypeRegistry.register('dumb', {
+  sides: 6,
+  color: [150,0,255],
+  baseSpeed: GAME_CONFIG.ALIEN_BASE_SPEED,
+  targetSpeed: GAME_CONFIG.ALIEN_TARGET_SPEED,
+  health: 1,
+  size: GAME_CONFIG.ALIEN_SIZE,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER,
+  behavior: behaviorDumb,
+  spawnWeight: (level, cycle) => cycle === 0 ? 0.55 : 0.30,
+  spawnSound: 'alien'
+});
+AlienTypeRegistry.register('planet', {
+  sides: 5,
+  color: [0,255,100],
+  baseSpeed: GAME_CONFIG.ALIEN_BASE_SPEED,
+  targetSpeed: GAME_CONFIG.ALIEN_TARGET_SPEED,
+  health: 1,
+  size: GAME_CONFIG.ALIEN_SIZE,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER,
+  behavior: behaviorSeekPlanets,
+  spawnWeight: (level, cycle) => cycle === 1 ? 0.50 : 0.25,
+  spawnSound: 'alien'
+});
+AlienTypeRegistry.register('player', {
+  sides: 4,
+  color: [255,50,50],
+  baseSpeed: GAME_CONFIG.ALIEN_BASE_SPEED,
+  targetSpeed: GAME_CONFIG.ALIEN_TARGET_SPEED,
+  health: 1,
+  size: GAME_CONFIG.ALIEN_SIZE,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER,
+  behavior: behaviorSeekPlayers,
+  spawnWeight: (level, cycle) => cycle === 2 ? 0.50 : 0.20,
+  spawnSound: 'alien'
+});
+AlienTypeRegistry.register('large', {
+  sides: 8,
+  color: [255,180,0],
+  baseSpeed: GAME_CONFIG.LARGE_ALIEN_BASE_SPEED,
+  targetSpeed: GAME_CONFIG.LARGE_ALIEN_BASE_SPEED * 0.9,
+  health: GAME_CONFIG.LARGE_ALIEN_HEALTH,
+  size: GAME_CONFIG.LARGE_ALIEN_SIZE,
+  contactDamage: GAME_CONFIG.LARGE_ALIEN_CONTACT_DAMAGE,
+  behavior: behaviorLarge,
+  spawnWeight: () => 0, // selected via special chance
+  spawnSound: 'large'
+});
 // === SOUND CONFIG ===
 const SOUND_CONFIG = {
   masterGain: 0.4,
@@ -365,7 +462,7 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
   for (let j = gameState.aliens.length - 1; j >= 0; j--) {
     const alien = gameState.aliens[j];
   const distance = dist(projectile.pos.x, projectile.pos.y, alien.pos.x, alien.pos.y);
-  const alienRadius = alien.isLarge ? GAME_CONFIG.LARGE_ALIEN_SIZE : GAME_CONFIG.ALIEN_SIZE;
+  const alienRadius = alien.size || (alien.isLarge ? GAME_CONFIG.LARGE_ALIEN_SIZE : GAME_CONFIG.ALIEN_SIZE);
   const projectileRadius = projectile.size ? projectile.size * 0.5 : GAME_CONFIG.PROJECTILE_SIZE * 0.5;
   const hitRadius = alienRadius + projectileRadius; // treat as circle vs point
   if (distance < hitRadius) {
@@ -484,30 +581,13 @@ function spawnAliens() {
   if (frameCount - gameState.lastAlienSpawnFrame >= currentSpawnInterval && 
       gameState.aliens.length < maxAliens) {
     const spawnPosition = getRandomEdgePosition();
-    // Level-based weighting: cycle emphasis every 3 levels
-    const cycle = (gameState.level - 1) % 3; // 0,1,2
-    let weights;
-    if (cycle === 0) { // random emphasis
-      weights = { dumb: 0.55, planet: 0.25, player: 0.20 };
-    } else if (cycle === 1) { // planet seekers surge
-      weights = { dumb: 0.30, planet: 0.50, player: 0.20 };
-    } else { // player hunters surge
-      weights = { dumb: 0.30, planet: 0.20, player: 0.50 };
-    }
-    const r = random();
-    let alienType;
-    if (r < weights.dumb) alienType = 'dumb';
-    else if (r < weights.dumb + weights.planet) alienType = 'planet';
-    else alienType = 'player';
-    // Large alien rare spawn (independent roll, but only if population not too large)
-    if (random() < GAME_CONFIG.LARGE_ALIEN_CHANCE) {
-      alienType = 'large';
-    }
+    // Determine alien type via registry weighting
+    let alienType = AlienTypeRegistry.pick(gameState.level);
+    if (random() < GAME_CONFIG.LARGE_ALIEN_CHANCE) alienType = 'large';
     const alien = new Alien(spawnPosition.x, spawnPosition.y, alienType);
     gameState.aliens.push(alien);
     if (soundManager) {
-      if (alienType === 'large') soundManager.spawnAlien('large');
-      else soundManager.spawnAlien(alienType);
+      soundManager.spawnAlien(alienType);
     }
     gameState.lastAlienSpawnFrame = frameCount;
   }
@@ -1346,27 +1426,24 @@ class Alien {
    */
   constructor(x, y, type) {
     this.pos = createVector(x, y);
-    
-    // Calculate speed with random variance and level scaling
-  const isLarge = type === 'large';
-  const baseSpeed = isLarge ? GAME_CONFIG.LARGE_ALIEN_BASE_SPEED : GAME_CONFIG.ALIEN_BASE_SPEED;
-    const speedMultiplier = getCurrentSpeedMultiplier();
-    const randomVariance = random(1 - GAME_CONFIG.ALIEN_SPEED_VARIANCE, 1 + GAME_CONFIG.ALIEN_SPEED_VARIANCE);
-    const finalSpeed = baseSpeed * speedMultiplier * randomVariance;
-    
-    this.vel = p5.Vector.random2D().mult(finalSpeed);
     this.type = type;
-  this.sides = this.getSidesForType(type);
-  this.color = this.getColorForType(type);
-  this.isLarge = isLarge;
-  this.health = isLarge ? GAME_CONFIG.LARGE_ALIEN_HEALTH : 1;
-    
-    // Store individual speed for target seeking
-    this.targetSpeed = GAME_CONFIG.ALIEN_TARGET_SPEED * speedMultiplier * randomVariance;
-    
-    // Rotation properties
-    this.rotation = random(TWO_PI); // Random starting rotation
-    this.rotationSpeed = random(-0.02, 0.02) * speedMultiplier; // Random rotation direction and speed scaled by level
+    const cfg = AlienTypeRegistry.get(type) || AlienTypeRegistry.get('dumb');
+    const speedMultiplier = getCurrentSpeedMultiplier();
+    const variance = random(1 - GAME_CONFIG.ALIEN_SPEED_VARIANCE, 1 + GAME_CONFIG.ALIEN_SPEED_VARIANCE);
+    const baseSpeed = cfg.baseSpeed ?? GAME_CONFIG.ALIEN_BASE_SPEED;
+    const finalSpeed = baseSpeed * speedMultiplier * variance;
+    this.vel = p5.Vector.random2D().mult(finalSpeed);
+    this.sides = cfg.sides || 6;
+    this.color = color(...cfg.color);
+    this.size = cfg.size || GAME_CONFIG.ALIEN_SIZE;
+    this.health = cfg.health || 1;
+    this.contactDamage = cfg.contactDamage || GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
+    this.behavior = cfg.behavior || behaviorDumb;
+    this.targetSpeed = (cfg.targetSpeed || GAME_CONFIG.ALIEN_TARGET_SPEED) * speedMultiplier * variance;
+    this.isLarge = (type === 'large'); // legacy flag
+    // Rotation
+    this.rotation = random(TWO_PI);
+    this.rotationSpeed = random(-0.02, 0.02) * speedMultiplier;
   }
 
   /**
@@ -1374,28 +1451,7 @@ class Alien {
    * @param {string} type - Alien type
    * @returns {number} - Number of sides
    */
-  getSidesForType(type) {
-    switch (type) {
-      case "planet": return 5;
-      case "player": return 4;
-  case 'large': return 8;
-      default: return 6; // "dumb" type
-    }
-  }
-
-  /**
-   * Get the color for the alien based on type
-   * @param {string} type - Alien type
-   * @returns {p5.Color} - Alien color
-   */
-  getColorForType(type) {
-    switch (type) {
-      case "planet": return color(0, 255, 100); // Green - seeks planets
-      case "player": return color(255, 50, 50);  // Red - seeks players
-  case 'large': return color(255, 180, 0);    // Orange - large tank
-      default: return color(150, 0, 255);        // Purple - random movement
-    }
-  }
+  // Legacy helpers removed (sides/color handled by registry)
 
   /**
    * Update alien movement and physics
@@ -1414,12 +1470,7 @@ class Alien {
    * Update movement based on alien type
    */
   updateMovement() {
-    if (this.type === "planet" && gameState.planets.length > 0) {
-      this.seekTarget(gameState.planets);
-    } else if (this.type === "player" && gameState.players.length > 0) {
-      this.seekTarget(gameState.players);
-    }
-    // "dumb" aliens maintain random movement (no change needed)
+  this.behavior(this, gameState);
   }
 
   /**
@@ -1474,7 +1525,7 @@ class Alien {
     beginShape();
     for (let i = 0; i < this.sides; i++) {
       const angle = map(i, 0, this.sides, 0, TWO_PI);
-      const radius = this.isLarge ? GAME_CONFIG.LARGE_ALIEN_SIZE : GAME_CONFIG.ALIEN_SIZE;
+  const radius = this.size;
       vertex(cos(angle) * radius, sin(angle) * radius);
     }
     endShape(CLOSE);
