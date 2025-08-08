@@ -364,9 +364,11 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
   }
   for (let j = gameState.aliens.length - 1; j >= 0; j--) {
     const alien = gameState.aliens[j];
-    const distance = dist(projectile.pos.x, projectile.pos.y, alien.pos.x, alien.pos.y);
-    
-    if (distance < GAME_CONFIG.PROJECTILE_HIT_RADIUS) {
+  const distance = dist(projectile.pos.x, projectile.pos.y, alien.pos.x, alien.pos.y);
+  const alienRadius = alien.isLarge ? GAME_CONFIG.LARGE_ALIEN_SIZE : GAME_CONFIG.ALIEN_SIZE;
+  const projectileRadius = projectile.size ? projectile.size * 0.5 : GAME_CONFIG.PROJECTILE_SIZE * 0.5;
+  const hitRadius = alienRadius + projectileRadius; // treat as circle vs point
+  if (distance < hitRadius) {
       createExplosion(alien.pos, alien.color); // Use alien's color for explosion
       if (alien.isLarge) {
         soundManager && soundManager.explosion('planet'); // deeper boom for large
