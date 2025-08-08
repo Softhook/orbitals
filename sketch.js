@@ -72,6 +72,8 @@ const GAME_CONFIG = {
   POWERUP_COLLECTION_RADIUS: 25,
   POWERUP_PULSE_SPEED: 0.1 // Speed of size pulsing animation
 };
+// Per-type soft caps to avoid runaway counts
+const ALIEN_TYPE_MAX = { vortex:2, splitter:4, blink:5, large:2 };
 
 // === ALIEN TYPE REGISTRY (modular behaviors) ===
 const AlienTypeRegistry = {
@@ -168,6 +170,147 @@ AlienTypeRegistry.register('large', {
   behavior: behaviorLarge,
   spawnWeight: () => 0, // selected via special chance
   spawnSound: 'large'
+});
+
+// === Additional Creative Alien Types ===
+function behaviorZigZag(alien) {
+  alien.zzTimer = (alien.zzTimer || 0) + 1;
+  if (alien.zzTimer % 30 === 0) {
+    const dir = random([1,-1]);
+    alien.vel.rotate(radians(60 * dir));
+    alien.vel.setMag(alien.targetSpeed);
+  }
+}
+function behaviorSplitter(alien, gameState) {
+  behaviorSeekPlayers(alien, gameState);
+}
+function behaviorMini(alien, gameState) { behaviorSeekPlayers(alien, gameState); }
+function behaviorBomber(alien, gameState) {
+  behaviorSeekPlayers(alien, gameState);
+  // Slight gradual speed up
+  alien.vel.setMag(min(alien.vel.mag()*1.005, alien.targetSpeed*1.4));
+}
+function behaviorOrbiter(alien, gameState) {
+  if (!alien.orbitTarget || !gameState.planets.includes(alien.orbitTarget)) {
+    alien.orbitTarget = random(gameState.planets);
+  }
+  if (!alien.orbitTarget) return;
+  const toCenter = p5.Vector.sub(alien.orbitTarget.pos, alien.pos);
+  const distC = toCenter.mag() + 0.001;
+  // Desired tangential direction
+  const tangent = createVector(-toCenter.y, toCenter.x).setMag(alien.targetSpeed);
+  // Add mild centering force
+  const centerPull = toCenter.copy().setMag(alien.targetSpeed * 0.2);
+  alien.vel = p5.Vector.add(tangent, centerPull).limit(alien.targetSpeed*1.2);
+}
+function behaviorLeech(alien, gameState) {
+  behaviorSeekPlanets(alien, gameState);
+  if (gameState.planets.length===0) return;
+  for (const p of gameState.planets) {
+    const d = p5.Vector.dist(alien.pos, p.pos);
+    if (d < GAME_CONFIG.PLANET_SIZE * 1.2) {
+      p.health -= 0.01; // slow siphon
+    }
+  }
+}
+function behaviorEvasive(alien, gameState) {
+  behaviorSeekPlayers(alien, gameState);
+  // Jink
+  const perp = createVector(-alien.vel.y, alien.vel.x).setMag(alien.targetSpeed*0.2);
+  alien.vel.add(perp.mult(random([-1,1]))).limit(alien.targetSpeed*1.3);
+}
+function behaviorBlink(alien, gameState) {
+  behaviorSeekPlayers(alien, gameState);
+  alien.blinkTimer = (alien.blinkTimer || 0) + 1;
+  if (alien.blinkTimer > 90 && gameState.players.length>0) {
+    const target = findClosestTarget(alien.pos, gameState.players);
+    if (target) {
+      const offset = p5.Vector.random2D().mult(80);
+      alien.pos = p5.Vector.add(target.pos, offset);
+    }
+    alien.blinkTimer = 0;
+  }
+}
+function behaviorShielded(alien, gameState) {
+  behaviorSeekPlayers(alien, gameState);
+  if (alien.invulnFrames && alien.invulnFrames>0) alien.invulnFrames--;
+}
+function behaviorVortex(alien, gameState) {
+  if (frameCount % 3 !== 0) return; // throttle
+  const r = alien.size*4, r2=r*r;
+  for (const proj of gameState.projectiles) {
+    const dx = proj.pos.x - alien.pos.x;
+    const dy = proj.pos.y - alien.pos.y;
+    const d2 = dx*dx + dy*dy;
+    if (d2 < r2) {
+      const inv = 1/(Math.sqrt(d2)||1);
+      proj.vel.x += -dx*inv*0.05;
+      proj.vel.y += -dy*inv*0.05;
+      proj.vel.limit(GAME_CONFIG.PROJECTILE_SPEED*1.2);
+    }
+  }
+}
+
+// Register new types (10)
+AlienTypeRegistry.register('zigzag', {
+  sides: 7, color:[200,60,255], baseSpeed:0.55, targetSpeed:0.35, health:1, size: GAME_CONFIG.ALIEN_SIZE,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorZigZag,
+  spawnWeight:(lvl,cycle)=> 0.15, spawnSound:'alien'
+});
+AlienTypeRegistry.register('splitter', {
+  sides: 6, color:[255,120,0], baseSpeed:0.5, targetSpeed:0.4, health:2, size: GAME_CONFIG.ALIEN_SIZE+4,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorSplitter,
+  onDeath:(alien)=>{ // spawn minis bounded
+    const room = getCurrentMaxAliens() - gameState.aliens.length;
+    if (room <= 0) return;
+    const spawnCount = min(2, room);
+    for (let k=0;k<spawnCount;k++) {
+      const a = new Alien(alien.pos.x + random(-10,10), alien.pos.y + random(-10,10), 'mini');
+      gameState.aliens.push(a);
+      soundManager && soundManager.spawnAlien('mini');
+    }
+  },
+  spawnWeight:(lvl,cycle)=> lvl>2?0.08:0.0, spawnSound:'alien'
+});
+AlienTypeRegistry.register('mini', {
+  sides: 5, color:[255,200,120], baseSpeed:0.9, targetSpeed:0.8, health:1, size: GAME_CONFIG.ALIEN_SIZE*0.55,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER*0.5, behavior: behaviorMini,
+  spawnWeight:()=>0, spawnSound:'alien'
+});
+AlienTypeRegistry.register('bomber', {
+  sides: 4, color:[255,80,160], baseSpeed:0.45, targetSpeed:0.5, health:2, size: GAME_CONFIG.ALIEN_SIZE+2,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER*1.2, behavior: behaviorBomber,
+  spawnWeight:(lvl,cycle)=> lvl>3?0.1:0.0, spawnSound:'alien'
+});
+AlienTypeRegistry.register('orbiter', {
+  sides: 8, color:[80,200,255], baseSpeed:0.4, targetSpeed:0.45, health:1, size: GAME_CONFIG.ALIEN_SIZE,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorOrbiter,
+  spawnWeight:(lvl,cycle)=> 0.12, spawnSound:'alien'
+});
+AlienTypeRegistry.register('leech', {
+  sides: 5, color:[120,255,120], baseSpeed:0.42, targetSpeed:0.42, health:1, size: GAME_CONFIG.ALIEN_SIZE,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorLeech,
+  spawnWeight:(lvl,cycle)=> lvl>1?0.1:0.05, spawnSound:'alien'
+});
+AlienTypeRegistry.register('evasive', {
+  sides: 6, color:[255,255,120], baseSpeed:0.6, targetSpeed:0.55, health:1, size: GAME_CONFIG.ALIEN_SIZE,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorEvasive,
+  spawnWeight:(lvl,cycle)=> 0.1, spawnSound:'alien'
+});
+AlienTypeRegistry.register('blink', {
+  sides: 3, color:[160,120,255], baseSpeed:0.5, targetSpeed:0.5, health:1, size: GAME_CONFIG.ALIEN_SIZE,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorBlink,
+  spawnWeight:(lvl,cycle)=> lvl>2?0.08:0.0, spawnSound:'alien'
+});
+AlienTypeRegistry.register('shielded', {
+  sides: 6, color:[120,200,255], baseSpeed:0.45, targetSpeed:0.45, health:3, size: GAME_CONFIG.ALIEN_SIZE+2,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorShielded,
+  spawnWeight:(lvl,cycle)=> lvl>3?0.07:0.0, spawnSound:'alien'
+});
+AlienTypeRegistry.register('vortex', {
+  sides: 9, color:[180,0,255], baseSpeed:0.35, targetSpeed:0.35, health:2, size: GAME_CONFIG.ALIEN_SIZE+6,
+  contactDamage: GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER, behavior: behaviorVortex,
+  spawnWeight:(lvl,cycle)=> lvl>4?0.06:0.0, spawnSound:'alien'
 });
 // === SOUND CONFIG ===
 const SOUND_CONFIG = {
@@ -378,44 +521,30 @@ function updateAndDrawPlayers() {
 function checkPlayerAlienCollisions(player, playerIndex) {
   for (let j = gameState.aliens.length - 1; j >= 0; j--) {
     const alien = gameState.aliens[j];
-    const distance = dist(player.pos.x, player.pos.y, alien.pos.x, alien.pos.y);
-    
-    if (distance < GAME_CONFIG.ALIEN_PLAYER_HIT_RADIUS) {
-      // Apply damage to player (unless shielded)
+    const dx = player.pos.x - alien.pos.x;
+    const dy = player.pos.y - alien.pos.y;
+    const rad = (alien.size||GAME_CONFIG.ALIEN_SIZE) + GAME_CONFIG.ALIEN_PLAYER_HIT_RADIUS;
+    if (dx*dx + dy*dy < rad*rad) {
       if (player.powerups.shield <= 0) {
-        player.health -= GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER;
+        player.health -= (alien.contactDamage || GAME_CONFIG.COLLISION_DAMAGE_TO_PLAYER);
       }
-  createExplosion(player.pos, player.color); // Use player's color for explosion
-  soundManager && soundManager.explosion(player.isLarge ? 'ship' : 'ship');
-      
-      // Chance to spawn powerup before removing alien
-      if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
-        spawnPowerup(alien.pos.x, alien.pos.y);
+      const cfg = AlienTypeRegistry.get(alien.type);
+      if (alien.type === 'shielded') {
+        alien.invulnFrames = alien.invulnFrames||0;
+        if (alien.invulnFrames>0) continue; else alien.invulnFrames=15;
       }
-      
-      if (alien.isLarge) {
-        alien.health -= 1;
-        if (alien.health <= 0) {
-          gameState.aliens.splice(j, 1);
-          gameState.aliensKilled++;
-          gameState.totalAliensKilled++;
-        }
-      } else {
-        gameState.aliens.splice(j, 1);
+      alien.health -= 1;
+      if (alien.health <= 0) {
+        if (cfg && cfg.onDeath) cfg.onDeath(alien);
+        gameState.aliens.splice(j,1);
         gameState.aliensKilled++;
         gameState.totalAliensKilled++;
+        if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) spawnPowerup(alien.pos.x, alien.pos.y);
+        soundManager && soundManager.explosion(alien.isLarge?'planet':'alien');
       }
-      
-  // For large alien, kills counted only when removed
-      
-      // Debug log (temporary)
-      console.log(`Alien hit player. Remaining aliens: ${gameState.aliens.length}`);
-      
-      // Remove player if health depleted
-      if (player.health <= 0) {
-        gameState.players.splice(playerIndex, 1);
-        break;
-      }
+      createExplosion(player.pos, player.color);
+      soundManager && soundManager.explosion('ship');
+      if (player.health <= 0) { gameState.players.splice(playerIndex,1); break; }
     }
   }
 }
@@ -461,29 +590,31 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
   }
   for (let j = gameState.aliens.length - 1; j >= 0; j--) {
     const alien = gameState.aliens[j];
-  const distance = dist(projectile.pos.x, projectile.pos.y, alien.pos.x, alien.pos.y);
-  const alienRadius = alien.size || (alien.isLarge ? GAME_CONFIG.LARGE_ALIEN_SIZE : GAME_CONFIG.ALIEN_SIZE);
-  const projectileRadius = projectile.size ? projectile.size * 0.5 : GAME_CONFIG.PROJECTILE_SIZE * 0.5;
-  const hitRadius = alienRadius + projectileRadius; // treat as circle vs point
-  if (distance < hitRadius) {
-      createExplosion(alien.pos, alien.color); // Use alien's color for explosion
-      if (alien.isLarge) {
-        soundManager && soundManager.explosion('planet'); // deeper boom for large
-      } else {
-        soundManager && soundManager.explosion('alien');
+    const dx = projectile.pos.x - alien.pos.x;
+    const dy = projectile.pos.y - alien.pos.y;
+    const alienRadius = alien.size || GAME_CONFIG.ALIEN_SIZE;
+    const projectileRadius = (projectile.size || GAME_CONFIG.PROJECTILE_SIZE)*0.5;
+    const hitR = alienRadius + projectileRadius;
+    if (dx*dx + dy*dy < hitR*hitR) {
+      if (alien.type === 'shielded') { // pre FX shield gate
+        alien.invulnFrames = alien.invulnFrames||0;
+        if (alien.invulnFrames>0) continue; else alien.invulnFrames=15;
       }
+      createExplosion(alien.pos, alien.color); // Use alien's color for explosion
+      soundManager && soundManager.explosion(alien.isLarge?'planet':'alien');
       
       // Chance to spawn powerup before removing alien
       if (random() < GAME_CONFIG.POWERUP_SPAWN_CHANCE) {
         spawnPowerup(alien.pos.x, alien.pos.y);
       }
       
-      if (alien.isLarge) {
-        alien.health -= projectile.damage || 1;
-        if (alien.health <= 0) {
-          removeAlienAndCount(j);
-        }
-      } else {
+      // Apply damage / special logic
+      const cfg = AlienTypeRegistry.get(alien.type);
+  // shield already handled
+      alien.health -= (projectile.damage || 1);
+      if (alien.health <= 0) {
+        // Death effects
+        if (cfg && typeof cfg.onDeath === 'function') cfg.onDeath(alien);
         removeAlienAndCount(j);
       }
       
@@ -497,7 +628,7 @@ function checkProjectileAlienCollisions(projectile, projectileIndex) {
         gameState.projectiles.splice(projectileIndex, 1);
       }
       
-  // Kill counters handled inside removeAlienAndCount for large alien
+  // Kill counters handled inside removeAlienAndCount
       // Debug log (temporary)
       console.log(`Projectile killed alien. Remaining aliens: ${gameState.aliens.length}`);
       
@@ -582,10 +713,12 @@ function spawnAliens() {
       gameState.aliens.length < maxAliens) {
     const spawnPosition = getRandomEdgePosition();
     // Determine alien type via registry weighting
-    let alienType = AlienTypeRegistry.pick(gameState.level);
-    if (random() < GAME_CONFIG.LARGE_ALIEN_CHANCE) alienType = 'large';
-    const alien = new Alien(spawnPosition.x, spawnPosition.y, alienType);
-    gameState.aliens.push(alien);
+  let alienType = AlienTypeRegistry.pick(gameState.level);
+  if (random() < GAME_CONFIG.LARGE_ALIEN_CHANCE) alienType = 'large';
+  const countOfType = gameState.aliens.reduce((c,a)=>c+(a.type===alienType),0);
+  if (ALIEN_TYPE_MAX[alienType] && countOfType >= ALIEN_TYPE_MAX[alienType]) alienType = 'dumb';
+  const alien = new Alien(spawnPosition.x, spawnPosition.y, alienType);
+  gameState.aliens.push(alien);
     if (soundManager) {
       soundManager.spawnAlien(alienType);
     }
