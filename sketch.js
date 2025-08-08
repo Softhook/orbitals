@@ -79,7 +79,6 @@ const POWERUP_TYPES = {
   HEALTH_BOOST: { name: "Health Pack", color: [0, 255, 0], symbol: "+", effect: "Restores health" },
   SHIELD: { name: "Energy Shield", color: [0, 255, 255], symbol: "S", effect: "Temporary invincibility" },
   THRUST_POWER: { name: "Turbo Thrust", color: [255, 200, 0], symbol: "T", effect: "Increases thrust power" },
-  GRAVITY_IMMUNITY: { name: "Anti-Gravity", color: [200, 0, 255], symbol: "G", effect: "Immune to gravity" },
   PENETRATING_SHOTS: { name: "Piercing Bullets", color: [255, 0, 0], symbol: "P", effect: "Bullets pierce through aliens" },
   EXPLOSIVE_SHOTS: { name: "Explosive Rounds", color: [255, 100, 0], symbol: "E", effect: "Bullets explode on impact" },
   HOMING_MISSILES: { name: "Seeking Missiles", color: [150, 255, 150], symbol: "H", effect: "Bullets track enemies" },
@@ -106,6 +105,26 @@ let gameState = {
 };
 
 // === MAIN GAME FUNCTIONS ===
+
+/**
+ * Draw a generic health bar (red background, green foreground)
+ * @param {number} x - left x of bar
+ * @param {number} y - top y of bar
+ * @param {number} widthPx - total width
+ * @param {number} heightPx - total height
+ * @param {number} current - current value
+ * @param {number} max - max value
+ */
+function drawStandardHealthBar(x, y, widthPx, heightPx, current, max) {
+  push();
+  noStroke();
+  fill(255,0,0);
+  rect(x, y, widthPx, heightPx);
+  fill(0,255,0);
+  const w = max <= 0 ? 0 : map(constrain(current,0,max), 0, max, 0, widthPx);
+  rect(x, y, w, heightPx);
+  pop();
+}
 
 /**
  * Initialize the game canvas and create initial game objects
@@ -494,13 +513,7 @@ function displayGameUI() {
   // Display alien population info with debug details
   const maxAliens = getCurrentMaxAliens();
   text(`Aliens: ${gameState.aliens.length}/${maxAliens}`, 10, 125);
-  
-  // Debug: Show how many aliens were created this frame (temporary)
-  if (frameCount - gameState.lastAlienSpawnFrame === 0) {
-    fill(0, 255, 0);
-    text("ALIEN SPAWNED!", 10, 145);
-    fill(255);
-  }
+  // Removed debug spawn notification for cleaner HUD
   
   pop();
 }
@@ -805,9 +818,6 @@ function applyPowerupToPlayer(player, type) {
     case 'THRUST_POWER':
       player.powerups.thrustPower = min(2.0, player.powerups.thrustPower + 0.3);
       break;
-    case 'GRAVITY_IMMUNITY':
-      player.powerups.gravityImmunity = 900; // 15 seconds
-      break;
     case 'PENETRATING_SHOTS':
       player.powerups.penetratingShots = 1200; // 20 seconds
       break;
@@ -887,7 +897,6 @@ class Player {
       multiShot: 1,            // Number of bullets to fire
       bulletSize: 1.0,         // Multiplier for bullet size
       thrustPower: 1.0,        // Multiplier for thrust power
-      gravityImmunity: 0,      // Duration of anti-gravity effect
       shield: 0,               // Duration of invincibility
       penetratingShots: 0,     // Duration of piercing bullets
       explosiveShots: 0,       // Duration of explosive bullets
@@ -913,7 +922,6 @@ class Player {
   updatePowerups() {
     // Decrement timed powerups
     if (this.powerups.shield > 0) this.powerups.shield--;
-    if (this.powerups.gravityImmunity > 0) this.powerups.gravityImmunity--;
     if (this.powerups.penetratingShots > 0) this.powerups.penetratingShots--;
     if (this.powerups.explosiveShots > 0) this.powerups.explosiveShots--;
     if (this.powerups.homingMissiles > 0) this.powerups.homingMissiles--;
@@ -1018,10 +1026,8 @@ class Player {
    * Apply physics including gravity and movement
    */
   applyPhysics() {
-    // Apply planetary gravity (unless immune)
-    if (this.powerups.gravityImmunity <= 0) {
-      applyPlanetaryGravity(this.pos, this.acc);
-    }
+  // Apply planetary gravity
+  applyPlanetaryGravity(this.pos, this.acc);
     
     // Update velocity and position
     this.vel.add(this.acc);
@@ -1083,16 +1089,6 @@ class Player {
       ellipse(0, 0, shieldRadius);
     }
     
-    // Anti-gravity effect
-    if (this.powerups.gravityImmunity > 0) {
-      noFill();
-      stroke(200, 0, 255, 100);
-      strokeWeight(2);
-      for (let r = 20; r <= 30; r += 5) {
-        ellipse(0, 0, r);
-      }
-    }
-    
     pop();
   }
 
@@ -1120,22 +1116,8 @@ class Player {
    * Draw the health bar above the ship
    */
   drawHealthBar() {
-    const barWidth = 40;
-    const barHeight = 5;
-    const barX = this.pos.x - barWidth / 2;
-    const barY = this.pos.y - 30;
-
-    push();
-    // Background (red)
-    fill(255, 0, 0);
-    noStroke();
-    rect(barX, barY, barWidth, barHeight);
-    
-    // Health (green)
-    fill(0, 255, 0);
-    const healthWidth = map(this.health, 0, GAME_CONFIG.PLAYER_MAX_HEALTH, 0, barWidth);
-    rect(barX, barY, healthWidth, barHeight);
-    pop();
+  const barWidth = 40, barHeight = 5;
+  drawStandardHealthBar(this.pos.x - barWidth/2, this.pos.y - 30, barWidth, barHeight, this.health, GAME_CONFIG.PLAYER_MAX_HEALTH);
   }
 }
 
@@ -1269,15 +1251,8 @@ class Planet {
    * Draw the planet's health bar
    */
   drawHealthBar() {
-    const barWidth = 40;
-    const barHeight = 5;
-    const barX = this.pos.x - barWidth / 2;
-    const barY = this.pos.y - 30;
-
-    fill(0, 255, 0);
-    noStroke();
-    const healthWidth = map(this.health, 0, GAME_CONFIG.PLANET_MAX_HEALTH, 0, barWidth);
-    rect(barX, barY, healthWidth, barHeight);
+  const barWidth = 40, barHeight = 5;
+  drawStandardHealthBar(this.pos.x - barWidth/2, this.pos.y - 30, barWidth, barHeight, this.health, GAME_CONFIG.PLANET_MAX_HEALTH);
   }
 }
 
