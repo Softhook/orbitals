@@ -413,6 +413,9 @@ class SimpleBeatEngine {
     this.beatIndex = 0; // 0..7 (8 steps per bar)
     this.activeCache = 0; // bitmask of categories last used (for possible future diff logic)
   this.swing = constrain(SOUND_CONFIG.swing || 0, 0, 0.3);
+  // Inactivity fade settings
+  this.fadeStartMs = 400;   // start reducing amplitude after 0.4s without shots
+  this.silenceMs = 2400;    // extend full silence point to 2.4s for longer decay
   }
   registerShot() {
     const now = millis();
@@ -431,7 +434,8 @@ class SimpleBeatEngine {
   update(players, aliens) {
     const now = millis();
     const interval = constrain(this.avgInterval, 90, 600);
-    while (now >= this.nextBeatTime) {
+    let guard=0; // prevent huge catch-up bursts after tab sleep
+    while (now >= this.nextBeatTime && guard < 16) {
       this.triggerBeat(players, aliens, this.beatIndex);
       this.beatIndex = (this.beatIndex + 1) % 8;
       const baseSub = interval/2; // 8th base
@@ -445,6 +449,7 @@ class SimpleBeatEngine {
       }
       // Safety to prevent spiral if clock jumps
       if (now - this.nextBeatTime > 2000) { this.nextBeatTime = now + interval/2; break; }
+      guard++;
     }
   }
   summarize(players) {
@@ -463,39 +468,46 @@ class SimpleBeatEngine {
   }
   triggerBeat(players, aliens, i) {
     const mask = this.summarize(players);
-    if (mask===0 && this.lastShots.length===0) return; // silence when nothing happening
+    // Prune very old shot timestamps (keep at most 2.5x silence window)
+    if (this.lastShots.length) {
+      const cutoff = millis() - this.silenceMs*2.5;
+      while (this.lastShots.length && this.lastShots[0] < cutoff) this.lastShots.shift();
+    }
+    const now = millis();
+    const timeSince = this.lastShots.length ? (now - this.lastShots[this.lastShots.length-1]) : Infinity;
+    let activity;
+    if (timeSince === Infinity) activity = 0; else if (timeSince <= this.fadeStartMs) activity = 1; else if (timeSince >= this.silenceMs) activity = 0; else activity = 1 - (timeSince - this.fadeStartMs)/(this.silenceMs - this.fadeStartMs);
+    if (activity <= 0) return; // fade to silence
     // Determine alien pressure (quick scan limited)
     let boss=false, large=false; for (let k=0;k<aliens.length && k<20;k++){ const a=aliens[k]; if (a.type==='boss') boss=true; if (a.isLarge||a.type==='large') large=true; if (boss&&large) break; }
-    // Base pulse: play on beats 0,2,4,6 if any shots recently else only beat 0
-    const recentShot = this.lastShots.length && (millis()-this.lastShots[this.lastShots.length-1] < 1200);
-    const baseBeat = recentShot ? (i%2===0) : (i===0);
-    if (baseBeat) this.sm.tone(boss?70: (large?85:95), 0.18, 'triangle', 0.22);
+    // Base pulse on even beats while active
+    if (i%2===0) this.sm.tone(boss?70: (large?85:95), 0.18, 'triangle', 0.22 * activity);
     // Accents: multiShot adds offbeat (i%2===1) soft tick
-    if ((mask&2) && i%2===1) this.sm.tone(220, 0.08, 'square', 0.10);
+    if ((mask&2) && i%2===1) this.sm.tone(220, 0.08, 'square', 0.10 * activity);
     // Fire rate adds 16th-like ghost: simulate by adding extra tick every third 8th
-    if ((mask&1) && (i===1||i===5)) this.sm.tone(640, 0.06, 'sine', 0.08);
+    if ((mask&1) && (i===1||i===5)) this.sm.tone(640, 0.06, 'sine', 0.08 * activity);
     // Shield shimmer every 4 beats
-    if ((mask&4) && i===4) this.sm.pitchSweep(900, 760, 0.25, 'sine', 0.12);
+    if ((mask&4) && i===4) this.sm.pitchSweep(900, 760, 0.25, 'sine', 0.12 * activity);
     // Special (penetrating/explosive/homing) adds low thud on beat 6
-    if ((mask&8) && i===6) this.sm.tone(140, 0.22, 'triangle', 0.18);
+    if ((mask&8) && i===6) this.sm.tone(140, 0.22, 'triangle', 0.18 * activity);
     // Damage multiplier adds square accent on beat 4
-    if ((mask&16) && i===4) this.sm.tone(300, 0.12, 'square', 0.16);
+    if ((mask&16) && i===4) this.sm.tone(300, 0.12, 'square', 0.16 * activity);
     // Movement adds upward blip on beat 3
-    if ((mask&32) && i===3) this.sm.pitchSweep(260, 320, 0.14, 'triangle', 0.14);
+    if ((mask&32) && i===3) this.sm.pitchSweep(260, 320, 0.14, 'triangle', 0.14 * activity);
 
   // --- Additional COLOR micro-patterns (ensure each active powerup introduces unique timbre) ---
   // FIRE_RATE: tiny high clave on every swung offbeat (odd index) with reduced gain
   if ((mask&1) && (i%2===1)) this.sm.tone(1200 + (i*5), 0.04, 'sine', 0.05);
   // MULTI_SHOT: metallic ping on beats 3 & 7
-  if ((mask&2) && (i===3 || i===7)) this.sm.pitchSweep(750, 680, 0.08, 'square', 0.09);
+  if ((mask&2) && (i===3 || i===7)) this.sm.pitchSweep(750, 680, 0.08, 'square', 0.09 * activity);
   // SHIELD: airy noise tick (simulate with very short high triangle) on beat 2
-  if ((mask&4) && i===2) this.sm.tone(1020, 0.05, 'triangle', 0.07);
+  if ((mask&4) && i===2) this.sm.tone(1020, 0.05, 'triangle', 0.07 * activity);
   // SPECIAL (penetrating/explosive/homing): brief rising chirp at beat 5
-  if ((mask&8) && i===5) this.sm.pitchSweep(300, 420, 0.12, 'sine', 0.08);
+  if ((mask&8) && i===5) this.sm.pitchSweep(300, 420, 0.12, 'sine', 0.08 * activity);
   // DAMAGE_MULTIPLIER: gated low square on beat 1
-  if ((mask&16) && i===1) this.sm.tone(180, 0.1, 'square', 0.11);
+  if ((mask&16) && i===1) this.sm.tone(180, 0.1, 'square', 0.11 * activity);
   // MOVEMENT: soft mid click every beat (keep quiet)
-  if ((mask&32)) this.sm.tone(400 + (i%2?30:0), 0.03, 'sine', 0.035);
+  if ((mask&32)) this.sm.tone(400 + (i%2?30:0), 0.03, 'sine', 0.035 * activity);
   }
 }
 
@@ -2095,15 +2107,22 @@ class SoundManager {
     const decay = cfg.decay;
     const impactAmp = density>6 ? 0.28 : 0.5;
     const thudAmp = density>6 ? 0.28 : 0.45;
-    // More percussive: downward metallic ping + low thud + gated noise puff
-    this.pitchSweep(base*4.0, base*1.0, decay*0.4, 'square', impactAmp);
-    this.tone(base*0.65, decay*0.85, 'triangle', thudAmp);
-    if (this.noise) {
-      const nAmp = isPlanet?0.8:(isShip?0.6:0.5);
-      this.noise.amp(nAmp * this.masterGain, 0.002);
-      this.noise.amp(0, decay*0.9);
-      this.lastNoiseUse = now;
-    }
+    const playExplosionNow = () => {
+      const impactScaled = impactAmp * 0.6; // overall volume reduction
+      const thudScaled = thudAmp * 0.6;
+      this.pitchSweep(base*4.0, base*1.0, decay*0.4, 'square', impactScaled);
+      this.tone(base*0.65, decay*0.85, 'triangle', thudScaled);
+      if (this.noise) {
+        const nAmp = (isPlanet?0.8:(isShip?0.6:0.5)) * 0.6; // reduce noise layer too
+        this.noise.amp(nAmp * this.masterGain, 0.002);
+        this.noise.amp(0, decay*0.9);
+        this.lastNoiseUse = millis();
+      }
+    };
+    // Only play if rhythm engine active; align strictly to next downbeat (never immediate without grid)
+    if (!this.rhythm) return; // suppress explosions when no rhythm grid
+    const delay = this.quantizeDelay(0, 1); // full subdivision window
+    setTimeout(playExplosionNow, delay);
   }
 
   pitchSweep(startFreq, endFreq, duration=0.2, type='sawtooth', amp=0.4) {
@@ -2418,5 +2437,31 @@ class SoundManager {
   playLevelUp(){ this.levelUp(); }
   playGameOver(){ this.gameOver(); }
   playTone(freq, decay=0.2, type='sine', gain=0.5){ this.tone(freq, decay, type, gain); }
+
+  // Helper: compute delay (ms) to quantize an event to next rhythmic subdivision (even 8th)
+  quantizeDelay(offsetMs=0, maxFraction=0.5) {
+    if (!this.rhythm) return 0;
+    const now = millis() + offsetMs;
+    // Reconstruct approximate current subdivision length from avgInterval
+    const interval = constrain(this.rhythm.avgInterval, 90, 600);
+    const sub = interval/2; // base 8th duration
+    // Predict nextBeatTime from engine; ensure it's in future
+    let target = this.rhythm.nextBeatTime;
+    if (target < now - 5) { // stale; don't over-complicate: no delay
+      return 0;
+    }
+    // Ensure we land on an even beat (downbeat) for weighty explosion alignment
+    let beatIndex = this.rhythm.beatIndex; // this is the NEXT index the engine will use
+    // If next beat is odd, shift to the following beat
+    if (beatIndex % 2 === 1) {
+      target += (sub * (this.rhythm.swing>0 ? (1 + this.rhythm.swing) : 1));
+      beatIndex = (beatIndex + 1) % 8;
+    }
+    let delay = target - now;
+    if (delay < 0) delay = 0;
+    const maxDelay = sub * maxFraction;
+    if (delay > maxDelay) delay = 0; // avoid long perceived latency
+    return delay;
+  }
 }
 
