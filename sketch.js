@@ -397,7 +397,8 @@ const SOUND_CONFIG = {
     DAMAGE_MULTIPLIER: { interval: 750, pattern: 'doubleKnock' }
   },
   rhythmMode: true, // enables lightweight beat engine
-  useLegacyPowerupLoops: false
+  useLegacyPowerupLoops: false,
+  swing: 0.16 // 0..0.3 amount (rhythmic swing for offbeats)
 };
 // === SIMPLE BEAT ENGINE (shot-synced, minimal work per frame) ===
 class SimpleBeatEngine {
@@ -408,6 +409,7 @@ class SimpleBeatEngine {
     this.nextBeatTime = millis() + 300;
     this.beatIndex = 0; // 0..7 (8 steps per bar)
     this.activeCache = 0; // bitmask of categories last used (for possible future diff logic)
+  this.swing = constrain(SOUND_CONFIG.swing || 0, 0, 0.3);
   }
   registerShot() {
     const now = millis();
@@ -429,7 +431,15 @@ class SimpleBeatEngine {
     while (now >= this.nextBeatTime) {
       this.triggerBeat(players, aliens, this.beatIndex);
       this.beatIndex = (this.beatIndex + 1) % 8;
-      this.nextBeatTime += interval/2; // 8th notes
+      const baseSub = interval/2; // 8th base
+      if (this.swing > 0) {
+        // swing applies to upcoming subdivision (after increment) -> even index = downbeat (short), odd = offbeat (long)
+        const isOff = (this.beatIndex % 2) === 1;
+        const dur = isOff ? baseSub * (1 + this.swing) : baseSub * (1 - this.swing);
+        this.nextBeatTime += dur;
+      } else {
+        this.nextBeatTime += baseSub;
+      }
       // Safety to prevent spiral if clock jumps
       if (now - this.nextBeatTime > 2000) { this.nextBeatTime = now + interval/2; break; }
     }
@@ -469,6 +479,20 @@ class SimpleBeatEngine {
     if ((mask&16) && i===4) this.sm.tone(300, 0.12, 'square', 0.16);
     // Movement adds upward blip on beat 3
     if ((mask&32) && i===3) this.sm.pitchSweep(260, 320, 0.14, 'triangle', 0.14);
+
+  // --- Additional COLOR micro-patterns (ensure each active powerup introduces unique timbre) ---
+  // FIRE_RATE: tiny high clave on every swung offbeat (odd index) with reduced gain
+  if ((mask&1) && (i%2===1)) this.sm.tone(1200 + (i*5), 0.04, 'sine', 0.05);
+  // MULTI_SHOT: metallic ping on beats 3 & 7
+  if ((mask&2) && (i===3 || i===7)) this.sm.pitchSweep(750, 680, 0.08, 'square', 0.09);
+  // SHIELD: airy noise tick (simulate with very short high triangle) on beat 2
+  if ((mask&4) && i===2) this.sm.tone(1020, 0.05, 'triangle', 0.07);
+  // SPECIAL (penetrating/explosive/homing): brief rising chirp at beat 5
+  if ((mask&8) && i===5) this.sm.pitchSweep(300, 420, 0.12, 'sine', 0.08);
+  // DAMAGE_MULTIPLIER: gated low square on beat 1
+  if ((mask&16) && i===1) this.sm.tone(180, 0.1, 'square', 0.11);
+  // MOVEMENT: soft mid click every beat (keep quiet)
+  if ((mask&32)) this.sm.tone(400 + (i%2?30:0), 0.03, 'sine', 0.035);
   }
 }
 
