@@ -416,6 +416,7 @@ class SimpleBeatEngine {
   // Inactivity fade settings
   this.fadeStartMs = 400;   // start reducing amplitude after 0.4s without shots
   this.silenceMs = 2400;    // extend full silence point to 2.4s for longer decay
+  this.spawnQueue = [];   // queued spawn sounds awaiting matching beat parity
   }
   registerShot() {
     const now = millis();
@@ -508,6 +509,26 @@ class SimpleBeatEngine {
   if ((mask&16) && i===1) this.sm.tone(180, 0.1, 'square', 0.11 * activity);
   // MOVEMENT: soft mid click every beat (keep quiet)
   if ((mask&32)) this.sm.tone(400 + (i%2?30:0), 0.03, 'sine', 0.035 * activity);
+
+    // --- Process queued spawn sounds (precise parity lock) ---
+    if (this.spawnQueue.length) {
+      const isOff = (i % 2) === 1;
+      let processed = 0;
+      for (let k = this.spawnQueue.length - 1; k >= 0 && processed < 4; k--) {
+        const ev = this.spawnQueue[k];
+        if (ev.wantOffbeat === isOff) {
+          this.spawnQueue.splice(k,1);
+          this.sm.playSpawnAlienType(ev.type);
+          processed++;
+        }
+      }
+      // Prevent unbounded growth (drop oldest if queue huge)
+      if (this.spawnQueue.length > 32) this.spawnQueue.splice(0, this.spawnQueue.length - 32);
+    }
+  }
+
+  enqueueSpawnSound(type, wantOffbeat) {
+    this.spawnQueue.push({ type, wantOffbeat });
   }
 }
 
@@ -2142,48 +2163,42 @@ class SoundManager {
 
   spawnAlien(type='alien') {
     if (!this.init() || this.muted) return;
+    if (!this.rhythm) return; // no rhythm grid -> suppress
+    const wantOffbeat = !(type==='boss' || type==='large');
+    this.rhythm.enqueueSpawnSound(type, wantOffbeat);
+  }
+
+  playSpawnAlienType(type) {
+    if (!this.init() || this.muted) return;
     const cfg = SOUND_CONFIG.alienSpawn;
     const f = cfg.baseFreq;
-    // More knock-like identifiers per alien type
-    const playKnock = (a,b,dec,type,amp)=> this.pitchSweep(a,b,dec,type,amp);
+    const amp = 0.1; // base amplitude scaling
+    const ps = (a,b,dec,w,ga)=> this.pitchSweep(a,b,dec,w,ga);
     switch (type) {
       case 'boss':
-        playKnock(f*0.9, f*0.5, cfg.decay*1.4, 'square', 0.55);
-        this.tone(f*0.4, cfg.decay*1.1, 'triangle', 0.35);
-        break;
+        ps(f*0.9, f*0.5, cfg.decay*1.4, 'square', amp*1.6); this.tone(f*0.4, cfg.decay*1.1, 'triangle', amp*1.3); break;
       case 'large':
-        playKnock(f*1.2, f*0.7, cfg.decay*0.9, 'square', 0.4);
-        break;
+        ps(f*1.2, f*0.7, cfg.decay*0.9, 'square', amp*1.3); break;
       case 'mini':
-        playKnock(f*1.6, f*1.1, cfg.decay*0.35, 'sine', 0.22);
-        break;
+        ps(f*1.6, f*1.1, cfg.decay*0.35, 'sine', amp*0.9); break;
       case 'vortex':
-        playKnock(f*1.1, f*0.6, cfg.decay*1.0, 'triangle', 0.38);
-        break;
+        ps(f*1.1, f*0.6, cfg.decay*1.0, 'triangle', amp*1.2); break;
       case 'shielded':
-        playKnock(f*1.3, f*0.95, cfg.decay*0.6, 'square', 0.32);
-        this.tone(f*0.6, cfg.decay*0.5, 'triangle', 0.18);
-        break;
+        ps(f*1.3, f*0.95, cfg.decay*0.6, 'square', amp*1.1); this.tone(f*0.6, cfg.decay*0.5, 'triangle', amp*0.9); break;
       case 'splitter':
-        playKnock(f*1.4, f, cfg.decay*0.5, 'square', 0.34);
-        break;
+        ps(f*1.4, f, cfg.decay*0.5, 'square', amp*1.0); break;
       case 'bomber':
-        playKnock(f*0.9, f*0.55, cfg.decay*0.85, 'sawtooth', 0.34);
-        break;
+        ps(f*0.9, f*0.55, cfg.decay*0.85, 'sawtooth', amp*1.15); break;
       case 'orbiter':
-        playKnock(f*1.1, f*0.8, cfg.decay*0.55, 'triangle', 0.3);
-        break;
+        ps(f*1.1, f*0.8, cfg.decay*0.55, 'triangle', amp*1.0); break;
       case 'leech':
-        playKnock(f*1.05, f*0.75, cfg.decay*0.6, 'sine', 0.26);
-        break;
+        ps(f*1.05, f*0.75, cfg.decay*0.6, 'sine', amp*0.95); break;
       case 'evasive':
-        playKnock(f*1.5, f*1.0, cfg.decay*0.4, 'square', 0.3);
-        break;
+        ps(f*1.5, f*1.0, cfg.decay*0.4, 'square', amp*1.05); break;
       case 'blink':
-        playKnock(f*1.8, f*0.9, cfg.decay*0.45, 'triangle', 0.32);
-        break;
+        ps(f*1.8, f*0.9, cfg.decay*0.45, 'triangle', amp*1.05); break;
       default:
-        playKnock(f*1.3, f*0.85, cfg.decay*0.55, 'square', 0.3);
+        ps(f*1.3, f*0.85, cfg.decay*0.55, 'square', amp*1.0); break;
     }
   }
 
