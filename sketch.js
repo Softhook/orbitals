@@ -514,6 +514,14 @@ const POWERUP_TYPES = {
   DAMAGE_MULTIPLIER: { name: "Power Amplifier", color: [255, 50, 150], symbol: "D", effect: "Increases damage" }
 };
 
+// Cached indices for powerup ordering (avoid repeated Object.keys / indexOf)
+const POWERUP_TYPE_INDEX = (() => {
+  const map = Object.create(null);
+  const keys = Object.keys(POWERUP_TYPES);
+  for (let i=0;i<keys.length;i++) map[keys[i]] = i;
+  return map;
+})();
+
 // === GAME STATE ===
 let gameState = {
   players: [],
@@ -2005,6 +2013,7 @@ class SoundManager {
   this.lastExplosionTimes = []; // for rate limiting
   this.loopStates = {}; // powerup loop pattern timers
   this.rhythm = SOUND_CONFIG.rhythmMode ? new SimpleBeatEngine(this) : null;
+  this.lastNoiseUse = 0;
   }
 
   init() {
@@ -2043,8 +2052,8 @@ class SoundManager {
     osc.setType(type);
     osc.freq(freq);
     // shape envelope per call (reuse object)
-    env.setADSR(0.001, decay*0.6, 0.0, decay*0.4);
-  env.setRange(amp * this.masterGain, 0.0001);
+  env.setADSR(0.001, decay*0.6, 0.0, decay*0.4);
+	env.setRange(amp * this.masterGain, 0);
     env.play(osc, 0, 0);
   }
 
@@ -2081,19 +2090,22 @@ class SoundManager {
     if (this.noise) {
       const nAmp = isPlanet?0.8:(isShip?0.6:0.5);
       this.noise.amp(nAmp * this.masterGain, 0.002);
-      this.noise.amp(0.0001, decay*0.9);
+      this.noise.amp(0, decay*0.9);
+      this.lastNoiseUse = now;
     }
   }
 
   pitchSweep(startFreq, endFreq, duration=0.2, type='sawtooth', amp=0.4) {
     if (!this.init() || this.muted) return;
+  // Cap simultaneous active sweeps to prevent uncontrolled growth
+  if (this.activeSweeps.length > 24) this.activeSweeps.splice(0, this.activeSweeps.length - 24);
     const idx = this.poolIndex++ % this.oscPool.length;
     const osc = this.oscPool[idx];
     const env = this.envPool[idx];
     osc.setType(type);
     osc.freq(startFreq);
-    env.setADSR(0.001, duration*0.7, 0.0, duration*0.3);
-    env.setRange(amp * this.masterGain, 0.0001);
+  env.setADSR(0.001, duration*0.7, 0.0, duration*0.3);
+  env.setRange(amp * this.masterGain, 0);
     env.play(osc, 0, 0);
     this.activeSweeps.push({ osc, startFreq, endFreq, startTime: millis(), duration: duration*1000 });
   }
@@ -2148,7 +2160,8 @@ class SoundManager {
   powerup(type) {
     if (!this.init() || this.muted) return;
     // Short rising blip cluster instead of melodic chord
-    const base = 500 + (Object.keys(POWERUP_TYPES).indexOf(type)%7)*35;
+  const idx = POWERUP_TYPE_INDEX[type] || 0;
+  const base = 500 + (idx % 7) * 35;
     this.pitchSweep(base*0.8, base*1.3, SOUND_CONFIG.powerup.decay*0.5, 'sine', 0.28);
     this.tone(base*1.6, SOUND_CONFIG.powerup.decay*0.4, 'square', 0.12);
   }
@@ -2182,42 +2195,50 @@ class SoundManager {
   if (SOUND_CONFIG.useLegacyPowerupLoops) this.updatePowerupLoops(activePlayers);
   // Lightweight beat engine
   if (this.rhythm) this.rhythm.update(activePlayers, gameState.aliens);
+  // Noise idle clamp
+  if (this.noise && (now - this.lastNoiseUse) > 1200) this.noise.amp(0, 0.05);
   }
 
   updatePowerupLoops(players) {
     if (!this.init() || this.muted) return;
-    const activeTypes = new Set();
-    players.forEach(p=>{
-      if (!p || !p.powerups) return;
-      const pw = p.powerups;
-      if (pw.fireRate > 1) activeTypes.add('FIRE_RATE');
-      if (pw.bulletSpeed > 1) activeTypes.add('BULLET_SPEED');
-      if (pw.multiShot > 1) activeTypes.add('MULTI_SHOT');
-      if (pw.bulletSize > 1) activeTypes.add('BULLET_SIZE');
-      if (pw.shield > 0) activeTypes.add('SHIELD');
-      if (pw.thrustPower > 1) activeTypes.add('THRUST_POWER');
-      if (pw.penetratingShots > 0) activeTypes.add('PENETRATING_SHOTS');
-      if (pw.explosiveShots > 0) activeTypes.add('EXPLOSIVE_SHOTS');
-      if (pw.homingMissiles > 0) activeTypes.add('HOMING_MISSILES');
-      if (pw.timeSlowField > 0) activeTypes.add('TIME_SLOW');
-      if (pw.damageMultiplier > 1) activeTypes.add('DAMAGE_MULTIPLIER');
-    });
-    // Stop removed loops by just letting them expire (patterns are one-shots)
-    activeTypes.forEach(type=> {
+    const now = millis();
+    // Collect active types into simple array to avoid Set overhead (few entries typical)
+    const activeTypes = [];
+    for (let p of players) {
+      if (!p || !p.powerups) continue; const pw = p.powerups;
+      if (pw.fireRate > 1) activeTypes.push('FIRE_RATE');
+      if (pw.bulletSpeed > 1) activeTypes.push('BULLET_SPEED');
+      if (pw.multiShot > 1) activeTypes.push('MULTI_SHOT');
+      if (pw.bulletSize > 1) activeTypes.push('BULLET_SIZE');
+      if (pw.shield > 0) activeTypes.push('SHIELD');
+      if (pw.thrustPower > 1) activeTypes.push('THRUST_POWER');
+      if (pw.penetratingShots > 0) activeTypes.push('PENETRATING_SHOTS');
+      if (pw.explosiveShots > 0) activeTypes.push('EXPLOSIVE_SHOTS');
+      if (pw.homingMissiles > 0) activeTypes.push('HOMING_MISSILES');
+      if (pw.timeSlowField > 0) activeTypes.push('TIME_SLOW');
+      if (pw.damageMultiplier > 1) activeTypes.push('DAMAGE_MULTIPLIER');
+    }
+    // De-dupe simple array (small n) manually
+    const seen = Object.create(null);
+    for (let i=0;i<activeTypes.length;i++) {
+      const type = activeTypes[i];
+      if (seen[type]) continue; seen[type]=1;
       const loopCfg = SOUND_CONFIG.powerupLoops[type];
-      if (!loopCfg) return;
+      if (!loopCfg) continue;
       const state = this.loopStates[type] || (this.loopStates[type] = { last:0 });
-      const now = millis();
       if (now - state.last >= loopCfg.interval) {
         state.last = now;
         this.playLoopPattern(loopCfg.pattern, type);
       }
-    });
+    }
   }
 
   playLoopPattern(name, type) {
     if (this.muted) return;
-    const base = 180 + (Object.keys(SOUND_CONFIG.powerupLoops).indexOf(type)%8)*22;
+  // Precompute key list lazily
+  if (!this._loopKeyCache) this._loopKeyCache = Object.keys(SOUND_CONFIG.powerupLoops);
+  const idx = this._loopKeyCache.indexOf(type);
+  const base = 180 + ((idx<0?0:idx)%8)*22;
     switch(name) {
       case 'tapHigh':
         this.tone(base*3.2, 0.08, 'sine', 0.18); break;
