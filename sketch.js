@@ -82,7 +82,7 @@ const BOSS_CONFIG = {
   SIZE: 60,
   CONTACT_DAMAGE: 60,
   SPLIT_SPAWN_INTERVAL: 240, // frames between automatic splitter spawns (~4s at 60fps)
-  SPLITTER_BURST_ON_HIT: 0.15, // chance to emit a splitter on each damaging hit
+  SPLITTER_BURST_ON_HIT: 0.25, // chance to emit a splitter on each damaging hit
   DEATH_SPLITTERS: 6 // burst of splitters on death (capped by room)
 };
 
@@ -372,18 +372,105 @@ AlienTypeRegistry.register('boss', {
 });
 // === SOUND CONFIG ===
 const SOUND_CONFIG = {
-  masterGain: 0.4,
-  shot: { baseFreq: 520, decay: 0.18 },
-  multiShotSpread: 0.06, // pitch variation factor per extra shot
-  explosion: { baseFreq: 90, decay: 0.6 },
-  planetExplosion: { baseFreq: 48, decay: 1.1 },
-  shipExplosion: { baseFreq: 140, decay: 0.7 },
-  alienSpawn: { baseFreq: 660, decay: 0.25 },
-  powerup: { decay: 0.25 },
-  levelUp: { freqs: [523, 659, 784], step: 0.12 },
-  gameOver: { freqs: [392, 233, 130], step: 0.25 },
-  waveforms: ['sine','triangle','sawtooth','square']
+  masterGain: 0.38,
+  shot: { baseFreq: 420, decay: 0.12 },
+  multiShotSpread: 0.05,
+  explosion: { baseFreq: 70, decay: 0.5 },
+  planetExplosion: { baseFreq: 42, decay: 0.9 },
+  shipExplosion: { baseFreq: 110, decay: 0.55 },
+  alienSpawn: { baseFreq: 520, decay: 0.2 },
+  powerup: { decay: 0.18 },
+  levelUp: { freqs: [660, 880, 990], step: 0.1 },
+  gameOver: { freqs: [180, 120, 90], step: 0.22 },
+  waveforms: ['triangle','sine','square','sawtooth'],
+  powerupLoops: {
+    FIRE_RATE: { interval: 450, pattern: 'tapHigh' },
+    BULLET_SPEED: { interval: 520, pattern: 'tapClick' },
+    MULTI_SHOT: { interval: 700, pattern: 'tripleDescend' },
+    BULLET_SIZE: { interval: 800, pattern: 'lowThud' },
+    SHIELD: { interval: 650, pattern: 'pulseWhoomp' },
+    THRUST_POWER: { interval: 600, pattern: 'riseBlip' },
+    PENETRATING_SHOTS: { interval: 500, pattern: 'metalPing' },
+    EXPLOSIVE_SHOTS: { interval: 550, pattern: 'mufBoom' },
+    HOMING_MISSILES: { interval: 560, pattern: 'radarBlip' },
+    TIME_SLOW: { interval: 900, pattern: 'reverseSweep' },
+    DAMAGE_MULTIPLIER: { interval: 750, pattern: 'doubleKnock' }
+  },
+  rhythmMode: true, // enables lightweight beat engine
+  useLegacyPowerupLoops: false
 };
+// === SIMPLE BEAT ENGINE (shot-synced, minimal work per frame) ===
+class SimpleBeatEngine {
+  constructor(sm) {
+    this.sm = sm;
+    this.lastShots = [];
+    this.avgInterval = 300; // ms between shots
+    this.nextBeatTime = millis() + 300;
+    this.beatIndex = 0; // 0..7 (8 steps per bar)
+    this.activeCache = 0; // bitmask of categories last used (for possible future diff logic)
+  }
+  registerShot() {
+    const now = millis();
+    this.lastShots.push(now);
+    if (this.lastShots.length > 6) this.lastShots.shift();
+    if (this.lastShots.length >= 2) {
+      let sum=0,cnt=0; for (let i=1;i<this.lastShots.length;i++){ const d=this.lastShots[i]-this.lastShots[i-1]; if(d>40){sum+=d;cnt++;}}
+      if (cnt) this.avgInterval = (this.avgInterval*0.7)+(sum/cnt*0.3);
+    }
+    // Pull nextBeatTime toward shot tempo for fast response
+    const targetInterval = constrain(this.avgInterval, 90, 600);
+    // Snap next beat within half interval so grid realigns gradually
+    const drift = this.nextBeatTime - now;
+    if (abs(drift) > targetInterval) this.nextBeatTime = now + targetInterval*0.5;
+  }
+  update(players, aliens) {
+    const now = millis();
+    const interval = constrain(this.avgInterval, 90, 600);
+    while (now >= this.nextBeatTime) {
+      this.triggerBeat(players, aliens, this.beatIndex);
+      this.beatIndex = (this.beatIndex + 1) % 8;
+      this.nextBeatTime += interval/2; // 8th notes
+      // Safety to prevent spiral if clock jumps
+      if (now - this.nextBeatTime > 2000) { this.nextBeatTime = now + interval/2; break; }
+    }
+  }
+  summarize(players) {
+    // Bit categories: 1 fire,2 multi,4 shield,8 special (penetrating/explosive/homing),16 damage,32 movement (thrust/bulletSpeed)
+    let mask=0;
+    players.forEach(p=>{
+      if (!p || !p.powerups) return; const pw=p.powerups;
+      if (pw.fireRate>1) mask|=1;
+      if (pw.multiShot>1) mask|=2;
+      if (pw.shield>0) mask|=4;
+      if (pw.penetratingShots>0||pw.explosiveShots>0||pw.homingMissiles>0) mask|=8;
+      if (pw.damageMultiplier>1) mask|=16;
+      if (pw.thrustPower>1||pw.bulletSpeed>1) mask|=32;
+    });
+    return mask;
+  }
+  triggerBeat(players, aliens, i) {
+    const mask = this.summarize(players);
+    if (mask===0 && this.lastShots.length===0) return; // silence when nothing happening
+    // Determine alien pressure (quick scan limited)
+    let boss=false, large=false; for (let k=0;k<aliens.length && k<20;k++){ const a=aliens[k]; if (a.type==='boss') boss=true; if (a.isLarge||a.type==='large') large=true; if (boss&&large) break; }
+    // Base pulse: play on beats 0,2,4,6 if any shots recently else only beat 0
+    const recentShot = this.lastShots.length && (millis()-this.lastShots[this.lastShots.length-1] < 1200);
+    const baseBeat = recentShot ? (i%2===0) : (i===0);
+    if (baseBeat) this.sm.tone(boss?70: (large?85:95), 0.18, 'triangle', 0.22);
+    // Accents: multiShot adds offbeat (i%2===1) soft tick
+    if ((mask&2) && i%2===1) this.sm.tone(220, 0.08, 'square', 0.10);
+    // Fire rate adds 16th-like ghost: simulate by adding extra tick every third 8th
+    if ((mask&1) && (i===1||i===5)) this.sm.tone(640, 0.06, 'sine', 0.08);
+    // Shield shimmer every 4 beats
+    if ((mask&4) && i===4) this.sm.pitchSweep(900, 760, 0.25, 'sine', 0.12);
+    // Special (penetrating/explosive/homing) adds low thud on beat 6
+    if ((mask&8) && i===6) this.sm.tone(140, 0.22, 'triangle', 0.18);
+    // Damage multiplier adds square accent on beat 4
+    if ((mask&16) && i===4) this.sm.tone(300, 0.12, 'square', 0.16);
+    // Movement adds upward blip on beat 3
+    if ((mask&32) && i===3) this.sm.pitchSweep(260, 320, 0.14, 'triangle', 0.14);
+  }
+}
 
 // === POWERUP TYPES ===
 const POWERUP_TYPES = {
@@ -543,7 +630,7 @@ function draw() {
   
   // Display game UI
   displayGameUI();
-  soundManager && soundManager.update();
+  soundManager && soundManager.update(gameState.players);
 }
 
 /**
@@ -1892,6 +1979,8 @@ class SoundManager {
   this.masterGain = SOUND_CONFIG.masterGain; // internal scaling (avoid masterVolume global)
   this.activeSweeps = [];
   this.lastExplosionTimes = []; // for rate limiting
+  this.loopStates = {}; // powerup loop pattern timers
+  this.rhythm = SOUND_CONFIG.rhythmMode ? new SimpleBeatEngine(this) : null;
   }
 
   init() {
@@ -1937,41 +2026,38 @@ class SoundManager {
 
   shot(shots=1) {
     if (!this.init() || this.muted) return;
+  if (this.rhythm) this.rhythm.registerShot();
     const spread = SOUND_CONFIG.multiShotSpread;
     for (let i=0;i<shots;i++) {
       const ratio = shots>1 ? (i/(shots-1)-0.5) : 0;
       const base = SOUND_CONFIG.shot.baseFreq * (1 + ratio*spread);
-  // Quick click (very short high freq sweep)
-  this.pitchSweep(base*1.8, base*1.2, SOUND_CONFIG.shot.decay*0.25, 'sine', 0.20);
-  // Core crack (square)
-  this.tone(base*0.95, SOUND_CONFIG.shot.decay*0.55, 'square', 0.38);
-  // Low tail
-  this.tone(base*0.5, SOUND_CONFIG.shot.decay*0.9, 'triangle', 0.18);
-  // Optional very subtle upward whisper
-  this.pitchSweep(base*0.9, base*1.02, SOUND_CONFIG.shot.decay*0.4, 'triangle', 0.10);
+      // Percussive: sharp click + low thud + tiny metallic overtone
+      this.pitchSweep(base*1.4, base*1.05, SOUND_CONFIG.shot.decay*0.18, 'square', 0.18);
+      this.tone(base*0.55, SOUND_CONFIG.shot.decay*0.9, 'triangle', 0.16);
+      if (i===0) this.tone(base*2.0, SOUND_CONFIG.shot.decay*0.25, 'sine', 0.06);
     }
   }
 
   explosion(kind='alien') {
     if (!this.init() || this.muted) return;
-  // Rate limit explosion layering: keep timestamps (ms) and trim
-  const now = millis();
-  this.lastExplosionTimes.push(now);
-  while (this.lastExplosionTimes.length && now - this.lastExplosionTimes[0] > 300) this.lastExplosionTimes.shift();
-  const density = this.lastExplosionTimes.length; // explosions in last 300ms
+    const now = millis();
+    this.lastExplosionTimes.push(now);
+    while (this.lastExplosionTimes.length && now - this.lastExplosionTimes[0] > 300) this.lastExplosionTimes.shift();
+    const density = this.lastExplosionTimes.length;
     const isPlanet = kind==='planet';
     const isShip = kind==='ship';
     const cfg = isPlanet ? SOUND_CONFIG.planetExplosion : (isShip? SOUND_CONFIG.shipExplosion : SOUND_CONFIG.explosion);
     const base = cfg.baseFreq;
     const decay = cfg.decay;
-  const impactAmp = density>6 ? 0.3 : 0.55;
-  const bodyAmp = density>6 ? 0.3 : 0.5;
-  this.pitchSweep(base*3, base*0.85, decay*0.55, 'sawtooth', impactAmp); // bright impact
-  this.tone(base, decay*0.7, 'triangle', bodyAmp); // low body
-    if (this.noise) { // crackle tail
-      const nAmp = isPlanet?0.85:(isShip?0.65:0.6);
+    const impactAmp = density>6 ? 0.28 : 0.5;
+    const thudAmp = density>6 ? 0.28 : 0.45;
+    // More percussive: downward metallic ping + low thud + gated noise puff
+    this.pitchSweep(base*4.0, base*1.0, decay*0.4, 'square', impactAmp);
+    this.tone(base*0.65, decay*0.85, 'triangle', thudAmp);
+    if (this.noise) {
+      const nAmp = isPlanet?0.8:(isShip?0.6:0.5);
       this.noise.amp(nAmp * this.masterGain, 0.002);
-      this.noise.amp(0.0001, decay);
+      this.noise.amp(0.0001, decay*0.9);
     }
   }
 
@@ -1991,59 +2077,56 @@ class SoundManager {
   spawnAlien(type='alien') {
     if (!this.init() || this.muted) return;
     const cfg = SOUND_CONFIG.alienSpawn;
-    // Differentiate by type: adjust waveform, direction, layering
+    const f = cfg.baseFreq;
+    // More knock-like identifiers per alien type
+    const playKnock = (a,b,dec,type,amp)=> this.pitchSweep(a,b,dec,type,amp);
     switch (type) {
       case 'boss':
-        this.pitchSweep(cfg.baseFreq*0.4, cfg.baseFreq*0.75, cfg.decay*1.6, 'sawtooth', 0.6);
-        setTimeout(()=> this.tone(cfg.baseFreq*0.5, cfg.decay*1.2, 'triangle', 0.4), cfg.decay*500);
+        playKnock(f*0.9, f*0.5, cfg.decay*1.4, 'square', 0.55);
+        this.tone(f*0.4, cfg.decay*1.1, 'triangle', 0.35);
         break;
       case 'large':
-        this.pitchSweep(cfg.baseFreq*0.55, cfg.baseFreq*0.8, cfg.decay*0.9, 'sawtooth', 0.45);
-        this.tone(cfg.baseFreq*0.5, cfg.decay*0.8, 'triangle', 0.25);
+        playKnock(f*1.2, f*0.7, cfg.decay*0.9, 'square', 0.4);
         break;
       case 'mini':
-        this.pitchSweep(cfg.baseFreq*1.2, cfg.baseFreq*1.45, cfg.decay*0.35, 'square', 0.25);
-        this.tone(cfg.baseFreq*1.6, cfg.decay*0.3, 'sine', 0.15);
+        playKnock(f*1.6, f*1.1, cfg.decay*0.35, 'sine', 0.22);
         break;
       case 'vortex':
-        this.pitchSweep(cfg.baseFreq*0.9, cfg.baseFreq*0.6, cfg.decay*1.2, 'triangle', 0.4);
-        setTimeout(()=> this.pitchSweep(cfg.baseFreq*0.6, cfg.baseFreq*0.4, cfg.decay*0.8, 'sine', 0.25), cfg.decay*300);
+        playKnock(f*1.1, f*0.6, cfg.decay*1.0, 'triangle', 0.38);
         break;
       case 'shielded':
-        this.pitchSweep(cfg.baseFreq*0.8, cfg.baseFreq, cfg.decay*0.5, 'square', 0.3);
-        this.tone(cfg.baseFreq*1.05, cfg.decay*0.5, 'sine', 0.18);
+        playKnock(f*1.3, f*0.95, cfg.decay*0.6, 'square', 0.32);
+        this.tone(f*0.6, cfg.decay*0.5, 'triangle', 0.18);
         break;
       case 'splitter':
-        this.pitchSweep(cfg.baseFreq*0.95, cfg.baseFreq*1.15, cfg.decay*0.4, 'square', 0.3);
+        playKnock(f*1.4, f, cfg.decay*0.5, 'square', 0.34);
         break;
       case 'bomber':
-        this.pitchSweep(cfg.baseFreq*0.7, cfg.baseFreq*0.95, cfg.decay*0.65, 'sawtooth', 0.35);
+        playKnock(f*0.9, f*0.55, cfg.decay*0.85, 'sawtooth', 0.34);
         break;
       case 'orbiter':
-        this.pitchSweep(cfg.baseFreq*1.0, cfg.baseFreq*1.2, cfg.decay*0.5, 'triangle', 0.3);
+        playKnock(f*1.1, f*0.8, cfg.decay*0.55, 'triangle', 0.3);
         break;
       case 'leech':
-        this.pitchSweep(cfg.baseFreq*0.85, cfg.baseFreq*1.05, cfg.decay*0.55, 'sine', 0.28);
+        playKnock(f*1.05, f*0.75, cfg.decay*0.6, 'sine', 0.26);
         break;
       case 'evasive':
-        this.pitchSweep(cfg.baseFreq*1.05, cfg.baseFreq*1.25, cfg.decay*0.35, 'square', 0.3);
+        playKnock(f*1.5, f*1.0, cfg.decay*0.4, 'square', 0.3);
         break;
       case 'blink':
-        this.pitchSweep(cfg.baseFreq*1.15, cfg.baseFreq*0.95, cfg.decay*0.45, 'triangle', 0.32);
-        setTimeout(()=> this.tone(cfg.baseFreq*1.4, cfg.decay*0.4, 'sine', 0.2), cfg.decay*350);
+        playKnock(f*1.8, f*0.9, cfg.decay*0.45, 'triangle', 0.32);
         break;
       default:
-        this.pitchSweep(cfg.baseFreq*0.75, cfg.baseFreq, cfg.decay*0.5, 'square', 0.35);
-        setTimeout(()=> this.tone(cfg.baseFreq*1.15, cfg.decay*0.6, 'sine', 0.25), cfg.decay*400);
+        playKnock(f*1.3, f*0.85, cfg.decay*0.55, 'square', 0.3);
     }
   }
 
   powerup(type) {
     if (!this.init() || this.muted) return;
-    const idx = Object.keys(POWERUP_TYPES).indexOf(type);
-    const base = 600 + (idx % 6)*40;
-    this.tone(base, SOUND_CONFIG.powerup.decay, 'sine', 0.35);
-    this.tone(base*1.25, SOUND_CONFIG.powerup.decay*0.8, 'triangle', 0.25);
+    // Short rising blip cluster instead of melodic chord
+    const base = 500 + (Object.keys(POWERUP_TYPES).indexOf(type)%7)*35;
+    this.pitchSweep(base*0.8, base*1.3, SOUND_CONFIG.powerup.decay*0.5, 'sine', 0.28);
+    this.tone(base*1.6, SOUND_CONFIG.powerup.decay*0.4, 'square', 0.12);
   }
 
   levelUp() {
@@ -2061,15 +2144,86 @@ class SoundManager {
   }
 
   toggleMute() { this.muted = !this.muted; }
-  update() {
-    if (!this.initialized || this.activeSweeps.length===0) return;
+  update(activePlayers=[]) {
+    if (!this.initialized) return;
     const now = millis();
+    // Pitch sweeps
     for (let i=this.activeSweeps.length-1;i>=0;i--) {
       const s = this.activeSweeps[i];
       const t = (now - s.startTime)/s.duration;
       if (t >= 1) { s.osc.freq(s.endFreq); this.activeSweeps.splice(i,1); continue; }
-      const f = lerp(s.startFreq, s.endFreq, t);
-      s.osc.freq(f);
+      s.osc.freq(lerp(s.startFreq, s.endFreq, t));
+    }
+  // Powerup loops (optional legacy)
+  if (SOUND_CONFIG.useLegacyPowerupLoops) this.updatePowerupLoops(activePlayers);
+  // Lightweight beat engine
+  if (this.rhythm) this.rhythm.update(activePlayers, gameState.aliens);
+  }
+
+  updatePowerupLoops(players) {
+    if (!this.init() || this.muted) return;
+    const activeTypes = new Set();
+    players.forEach(p=>{
+      if (!p || !p.powerups) return;
+      const pw = p.powerups;
+      if (pw.fireRate > 1) activeTypes.add('FIRE_RATE');
+      if (pw.bulletSpeed > 1) activeTypes.add('BULLET_SPEED');
+      if (pw.multiShot > 1) activeTypes.add('MULTI_SHOT');
+      if (pw.bulletSize > 1) activeTypes.add('BULLET_SIZE');
+      if (pw.shield > 0) activeTypes.add('SHIELD');
+      if (pw.thrustPower > 1) activeTypes.add('THRUST_POWER');
+      if (pw.penetratingShots > 0) activeTypes.add('PENETRATING_SHOTS');
+      if (pw.explosiveShots > 0) activeTypes.add('EXPLOSIVE_SHOTS');
+      if (pw.homingMissiles > 0) activeTypes.add('HOMING_MISSILES');
+      if (pw.timeSlowField > 0) activeTypes.add('TIME_SLOW');
+      if (pw.damageMultiplier > 1) activeTypes.add('DAMAGE_MULTIPLIER');
+    });
+    // Stop removed loops by just letting them expire (patterns are one-shots)
+    activeTypes.forEach(type=> {
+      const loopCfg = SOUND_CONFIG.powerupLoops[type];
+      if (!loopCfg) return;
+      const state = this.loopStates[type] || (this.loopStates[type] = { last:0 });
+      const now = millis();
+      if (now - state.last >= loopCfg.interval) {
+        state.last = now;
+        this.playLoopPattern(loopCfg.pattern, type);
+      }
+    });
+  }
+
+  playLoopPattern(name, type) {
+    if (this.muted) return;
+    const base = 180 + (Object.keys(SOUND_CONFIG.powerupLoops).indexOf(type)%8)*22;
+    switch(name) {
+      case 'tapHigh':
+        this.tone(base*3.2, 0.08, 'sine', 0.18); break;
+      case 'tapClick':
+        this.pitchSweep(base*3.5, base*3.0, 0.07, 'square', 0.16); break;
+      case 'tripleDescend':
+        this.pitchSweep(base*4.2, base*3.2, 0.09, 'square', 0.18);
+        setTimeout(()=> this.pitchSweep(base*3.2, base*2.6, 0.09, 'square', 0.15), 70);
+        setTimeout(()=> this.pitchSweep(base*2.6, base*2.2, 0.09, 'square', 0.13), 140);
+        break;
+      case 'lowThud':
+        this.tone(base*0.9, 0.25, 'triangle', 0.22); break;
+      case 'pulseWhoomp':
+        this.pitchSweep(base*1.6, base*0.8, 0.18, 'triangle', 0.25); break;
+      case 'riseBlip':
+        this.pitchSweep(base*1.0, base*1.8, 0.12, 'sine', 0.18); break;
+      case 'metalPing':
+        this.pitchSweep(base*4.5, base*3.8, 0.12, 'square', 0.16); break;
+      case 'mufBoom':
+        this.tone(base*0.7, 0.3, 'triangle', 0.24); break;
+      case 'radarBlip':
+        this.pitchSweep(base*2.2, base*2.6, 0.11, 'sine', 0.15); break;
+      case 'reverseSweep':
+        this.pitchSweep(base*0.6, base*1.4, 0.25, 'triangle', 0.2); break;
+      case 'doubleKnock':
+        this.pitchSweep(base*2.5, base*2.0, 0.07, 'square', 0.18);
+        setTimeout(()=> this.pitchSweep(base*2.0, base*1.6, 0.08, 'square', 0.15), 90);
+        break;
+      default:
+        this.tone(base*1.2, 0.1, 'sine', 0.15);
     }
   }
 
