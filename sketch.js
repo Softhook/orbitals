@@ -381,6 +381,9 @@ const SOUND_CONFIG = {
   alienSpawn: { baseFreq: 520, decay: 0.2 },
   powerup: { decay: 0.18 },
   levelUp: { freqs: [660, 880, 990], step: 0.1 },
+  // New nicer level up chord (C major add9 shape baseline); freqs used as fallback
+  // Will be dynamically overridden by procedural chord in levelUp()
+  
   gameOver: { freqs: [180, 120, 90], step: 0.22 },
   waveforms: ['triangle','sine','square','sawtooth'],
   powerupLoops: {
@@ -1263,6 +1266,7 @@ function updateAndDrawPowerups() {
       if (dx*dx + dy*dy < r*r) {
         applyPowerupToPlayer(player, powerup.type);
   soundManager && soundManager.powerup(powerup.type);
+  soundManager && soundManager.melodicPowerupHook(powerup.type);
         gameState.powerups.splice(i, 1);
         collected = true;
         break;
@@ -2014,6 +2018,13 @@ class SoundManager {
   this.loopStates = {}; // powerup loop pattern timers
   this.rhythm = SOUND_CONFIG.rhythmMode ? new SimpleBeatEngine(this) : null;
   this.lastNoiseUse = 0;
+  // Pad & melodic systems
+  this.padVoices = [];
+  this.maxPadVoices = 3;
+  this.nextPadTime = 0;
+  this.melodyQueue = [];
+  this.lastMelodyTime = 0;
+  this.scaleIndex = 0; // rotate through scales for variety
   }
 
   init() {
@@ -2168,9 +2179,37 @@ class SoundManager {
 
   levelUp() {
     if (!this.init() || this.muted) return;
-    SOUND_CONFIG.levelUp.freqs.forEach((f,i)=> {
-      setTimeout(()=> this.tone(f, 0.25, 'sine', 0.5), i * SOUND_CONFIG.levelUp.step*1000);
-    });
+    // Two variant system (old one removed): Bell Cascade & Portal Drop alternate
+    const lvl = (typeof gameState!=='undefined' && gameState.level) ? gameState.level : 1;
+    const variant = lvl % 2; // 0 or 1
+    if (variant === 0) {
+      // Bell Cascade
+      const base = random([392, 415, 440]);
+      const ratios = [1, 1.19, 1.5, 2.38, 3.01];
+      ratios.forEach((r,i)=> {
+        const f = base * r;
+        setTimeout(()=> {
+          this.tone(f, 0.9, 'sine', 0.28);
+          this.tone(f*0.5, 1.2, 'triangle', 0.12);
+        }, i*110);
+      });
+      setTimeout(()=> this.pitchSweep(base*4, base*2.2, 0.9, 'sine', 0.18), 160);
+      setTimeout(()=> this.pitchSweep(base*5, base*2.8, 1.1, 'triangle', 0.14), 300);
+    } else {
+      // Portal Drop
+      const root = random([330, 349, 370]);
+      this.pitchSweep(root*3.2, root*0.9, 0.55, 'square', 0.22);
+      setTimeout(()=> this.pitchSweep(root*2.4, root*0.7, 0.65, 'triangle', 0.18), 90);
+      const minor = (lvl % 4)===1; // alternate minor/major feel
+      const arp = minor ? [0,3,7,10,14] : [0,4,7,11,14];
+      arp.forEach((st,i)=> {
+        const f = root * pow(2, st/12);
+        setTimeout(()=> this.tone(f, 0.25, 'sine', 0.26 - i*0.03), 400 + i*85);
+      });
+      setTimeout(()=> this.pitchSweep(root*0.5, root*2.5, 1.2, 'sine', 0.12), 380);
+    }
+    // Phrase every other Bell cascade to avoid crowding
+    if (variant === 0 && (lvl % 4 === 0)) this.queueMelodicPhrase('level');
   }
 
   gameOver() {
@@ -2197,6 +2236,9 @@ class SoundManager {
   if (this.rhythm) this.rhythm.update(activePlayers, gameState.aliens);
   // Noise idle clamp
   if (this.noise && (now - this.lastNoiseUse) > 1200) this.noise.amp(0, 0.05);
+  // Ambient systems
+  this.updatePads(now);
+  this.updateMelody(now);
   }
 
   updatePowerupLoops(players) {
@@ -2273,6 +2315,101 @@ class SoundManager {
   }
 
   setMasterGain(g) { this.masterGain = g; }
+
+  /* ============= PAD & MELODIC SYSTEMS ============= */
+  playPadChord() {
+    if (!this.init() || this.muted) return;
+    const now = millis();
+    if (this.padVoices.length >= this.maxPadVoices) return; // limit
+    // Choose scale set & chord
+    const scales = [
+      [0,2,5,7,9],          // Suspended / mix
+      [0,3,5,7,10],         // Minor pent
+      [0,2,4,7,9],          // Major add9
+      [0,2,3,7,8],          // Exotic
+      [0,5,7,10]            // Power + m7
+    ];
+    const rootBase = 110; // base A2-ish
+    const scale = scales[this.scaleIndex % scales.length];
+    this.scaleIndex++;
+    // Build chord (pick 3 distinct scale degrees)
+    const chordDegrees = [];
+    while (chordDegrees.length < 3) {
+      const d = scale[floor(random(scale.length))];
+      if (!chordDegrees.includes(d)) chordDegrees.push(d);
+    }
+    const chordFreqs = chordDegrees.map(d=> rootBase * pow(2, d/12));
+    // Create pad voice (two detuned oscillators per note for softness)
+    chordFreqs.forEach((f,idx)=> {
+      if (this.padVoices.length >= this.maxPadVoices) return;
+      const oscA = new p5.Oscillator('triangle');
+      const oscB = new p5.Oscillator('sine');
+      const env = new p5.Envelope();
+      // Slow attack & release for pad
+      const attack = 0.6, release = 3.0;
+      env.setADSR(attack, 0.8, 0.4, release); // sustain at 40%
+      env.setRange(0.18 * this.masterGain, 0);
+      oscA.start(); oscB.start();
+      oscA.freq(f * random(0.997,1.003));
+      oscB.freq(f * 2 * random(0.997,1.003)); // gentle upper harmonic
+      oscA.amp(0); oscB.amp(0);
+      env.play(oscA, 0, 0); env.play(oscB, 0, 0);
+      const voice = { oscA, oscB, env, baseF: f, start: now, end: now + (attack+0.8+release)*1000, vibratoPhase: random(TWO_PI) };
+      this.padVoices.push(voice);
+    });
+  }
+
+  updatePads(now) {
+    if (!this.padVoices.length) return;
+    const vibratoRate = 0.8; // Hz
+    const vibratoDepth = 0.5; // semitone fraction
+    for (let i=this.padVoices.length-1;i>=0;i--) {
+      const v = this.padVoices[i];
+      const tSec = (now - v.start)/1000;
+      v.vibratoPhase += (TWO_PI * vibratoRate)/60; // approximate per-frame (assuming ~60fps) without heavy timing
+      const vib = sin(v.vibratoPhase) * vibratoDepth/12; // convert semitone fraction
+      const mod = pow(2, vib);
+      v.oscA.freq(v.baseF * mod);
+      v.oscB.freq(v.baseF * 2 * mod);
+      if (now > v.end) {
+        // Hard stop & remove
+        v.oscA.stop(); v.oscB.stop();
+        this.padVoices.splice(i,1);
+      }
+    }
+  }
+
+  queueMelodicPhrase(kind='generic') {
+    if (!this.init() || this.muted) return;
+    const now = millis();
+    // Avoid spamming phrases
+    if (now - this.lastMelodyTime < 1500) return;
+    this.lastMelodyTime = now;
+    const phrasePools = {
+      level: [ [0,4,7,9,7,4,0], [0,7,9,12,9,7,4], [0,3,7,10,7,3,0] ],
+      power: [ [0,5,7,5,0], [0,7,10,7,0], [0,4,7,11,7,4] ],
+      generic: [ [0,2,4,7,4,2], [0,3,5,7,5,3], [0,5,9,12,9,5] ]
+    };
+    const pool = phrasePools[kind] || phrasePools.generic;
+    const seq = random(pool);
+    const rootOptions = [220, 247, 262, 294];
+    const root = random(rootOptions);
+    const tempoMs = 180; // fixed short note length
+    this.melodyQueue = seq.map((st,i)=> ({ time: now + i*tempoMs, freq: root * pow(2, st/12) }));
+  }
+
+  updateMelody(now) {
+    if (!this.melodyQueue.length) return;
+    while (this.melodyQueue.length && now >= this.melodyQueue[0].time) {
+      const n = this.melodyQueue.shift();
+      this.tone(n.freq, 0.28, 'sine', 0.22);
+    }
+  }
+
+  melodicPowerupHook(type) {
+    // Trigger phrases for notable powerups (shield, time slow, damage boost)
+    if (type==='SHIELD' || type==='TIME_SLOW' || type==='DAMAGE_MULTIPLIER') this.queueMelodicPhrase('power');
+  }
 
   // Backward compatibility wrappers (old API names)
   playShot(shots=1){ this.shot(shots); }
